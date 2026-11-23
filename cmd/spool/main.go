@@ -10,15 +10,15 @@ import (
 	"strings"
 )
 
-const usage = `wire [--json] <command> [options]
+const usage = `spool [--json] <command> [options]
   init [--relay HTTPS_URL] [--gate-key KEY] [--label LABEL]
   whoami
   send ADDRESS [-m MESSAGE] [-f FILE]... [--reply-to ID]
   poll [--since ID] [--limit 1..100]
   download ATTACHMENT_ID [-o FILE_OR_DIRECTORY]
 
-Use RELAY_URL and GATE_KEY for first-time setup; WIRE_CONFIG selects a profile.
-WIRE_CA_FILE adds a PEM CA bundle to the system roots. --json works on every command.`
+Use RELAY_URL and GATE_KEY for first-time setup; SPOOL_CONFIG selects a profile.
+SPOOL_CA_FILE adds a PEM CA bundle to the system roots. --json works on every command.`
 
 type usageError string
 
@@ -167,7 +167,7 @@ func execute(o options, out io.Writer) error {
 		p, err = provision(path, p, o)
 	}
 	if errors.Is(err, os.ErrNotExist) && p == nil && o.command != "init" {
-		return errors.New("profile not found; run wire init first")
+		return errors.New("profile not found; run spool init first")
 	}
 	if err != nil {
 		return err
@@ -204,7 +204,7 @@ func run(args []string, out, stderr io.Writer) int {
 	if o.json {
 		_ = json.NewEncoder(stderr).Encode(map[string]string{"error": err.Error()})
 	} else {
-		fmt.Fprintln(stderr, "wire:", err)
+		fmt.Fprintln(stderr, "spool:", err)
 	}
 	var usageProblem usageError
 	if errors.As(err, &usageProblem) {

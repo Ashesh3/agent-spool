@@ -1,4 +1,4 @@
-// Package relay implements the private wire mailbox HTTP service.
+// Package relay implements the private spool mailbox HTTP service.
 package relay
 
 import (

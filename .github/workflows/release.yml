@@ -22,7 +22,7 @@ jobs:
           for os in darwin linux windows; do
             ext=''; if [ "$os" = windows ]; then ext='.exe'; fi
             for arch in amd64 arm64; do
-              for cmd in wire wire-relay; do
+              for cmd in spool spool-relay; do
                 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/$cmd-$os-$arch$ext" "./cmd/$cmd"
               done
             done

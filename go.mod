@@ -1,4 +1,4 @@
-module wire
+module spool
 
 go 1.26.0
 

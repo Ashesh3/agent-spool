@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"wire/internal/relay"
+	"spool/internal/relay"
 )
 
 var (

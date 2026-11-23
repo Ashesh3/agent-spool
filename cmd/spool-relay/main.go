@@ -1,4 +1,4 @@
-// Command wire-relay serves one private wire address domain.
+// Command spool-relay serves one private spool address domain.
 package main
 
 import (
@@ -17,10 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"wire/internal/relay"
+	"spool/internal/relay"
 )
 
-const usage = "wire-relay [serve|keygen] [--json]"
+const usage = "spool-relay [serve|keygen] [--json]"
 
 func main() {
 	args := os.Args[1:]

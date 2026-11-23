@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"wire/internal/relay"
+	"spool/internal/relay"
 )
 
 func TestRateLimitIsPerMember(t *testing.T) {

@@ -65,9 +65,9 @@ func (r *relay) download(o options, out io.Writer) error {
 	}
 	defer resp.Body.Close()
 	var source io.Reader = resp.Body
-	encodings := resp.Header.Values("X-Wire-Encoding")
+	encodings := resp.Header.Values("X-Spool-Encoding")
 	if len(encodings) != 1 {
-		return errors.New("expected exactly one X-Wire-Encoding header")
+		return errors.New("expected exactly one X-Spool-Encoding header")
 	}
 	switch encodings[0] {
 	case "plain":
@@ -77,7 +77,7 @@ func (r *relay) download(o options, out io.Writer) error {
 			return errors.New("attachment decryption failed; no output published")
 		}
 	default:
-		return errors.New("unknown X-Wire-Encoding; refusing ambiguous attachment")
+		return errors.New("unknown X-Spool-Encoding; refusing ambiguous attachment")
 	}
 	path, err := destination(o.output, resp.Header.Get("Content-Disposition"))
 	if err != nil {
