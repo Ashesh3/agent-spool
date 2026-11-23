@@ -26,7 +26,7 @@ func TestRateLimitIsPerMember(t *testing.T) {
 
 func TestQuotaIsChargedToSendingMember(t *testing.T) {
 	s := start(t, relay.Config{DataDir: t.TempDir(), QuotaBytes: 8})
-	a, b := s.mint(t, gateA), s.mint(t, gateB)
+	a, b := s.mint(t, gateA, "{}"), s.mint(t, gateB, "{}")
 	send := func(from, to inbox, member, text string, status int) string {
 		p := fmt.Sprintf(`{"to":%q,"from":%q,"body":%q}`, to.Address, from.Address, text)
 		data, _ := s.call(t, "POST", "/v1/messages", member, from.Secret, "application/json", strings.NewReader(p), status)

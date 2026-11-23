@@ -1,4 +1,4 @@
-name: Release binaries
+name: Release relay and agent guide
 on:
   push:
     tags: ['v*']
@@ -12,7 +12,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27.4'
-      - name: Test and cross-compile standalone binaries
+      - name: Test and cross-compile the relay
         env:
           CGO_ENABLED: '0'
         run: |
@@ -22,13 +22,12 @@ jobs:
           for os in darwin linux windows; do
             ext=''; if [ "$os" = windows ]; then ext='.exe'; fi
             for arch in amd64 arm64; do
-              for cmd in spool spool-relay; do
-                GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/$cmd-$os-$arch$ext" "./cmd/$cmd"
-              done
+              GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/spool-relay-$os-$arch$ext" ./cmd/spool-relay
             done
           done
-          (cd dist && sha256sum * > SHA256SUMS)
-      - name: Publish binaries and checksums
+          cp AGENT_API.md dist/
+          (cd dist && sha256sum spool-relay-* AGENT_API.md > SHA256SUMS)
+      - name: Publish relay binaries, agent guide and checksums
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/*

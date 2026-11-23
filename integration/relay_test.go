@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"filippo.io/age"
 	"spool/internal/relay"
 )
 
@@ -96,21 +95,12 @@ type inbox struct {
 	Secret  string `json:"inbox_secret"`
 }
 
-func (s *harness) mint(t *testing.T, gate string) inbox {
+func (s *harness) mint(t *testing.T, gate, requestJSON string) inbox {
 	t.Helper()
-	key, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	pk := key.Recipient().String()
-	body, _ := s.call(t, "POST", "/v1/inboxes", gate, "", "application/json", strings.NewReader(`{"public_key":"`+pk+`"}`), 201)
+	body, _ := s.call(t, "POST", "/v1/inboxes", gate, "", "application/json", strings.NewReader(requestJSON), 201)
 	i := unpack[inbox](t, body)
 	if i.ID == "" || i.Address != i.ID+"@team.test" || i.Secret == "" {
 		t.Fatal("invalid inbox credentials")
-	}
-	keyBytes, _ := s.call(t, "GET", "/v1/inboxes/"+i.ID+"/pubkey", gate, "", "", nil, 200)
-	if unpack[map[string]string](t, keyBytes)["public_key"] != pk {
-		t.Fatal("key discovery returned the wrong recipient")
 	}
 	return i
 }
@@ -133,11 +123,11 @@ type page struct {
 	} `json:"messages"`
 }
 
-func upload(t *testing.T, s *harness, from, to inbox, data []byte) string {
+func upload(t *testing.T, s *harness, from, to inbox, text, encoding string, data []byte) string {
 	t.Helper()
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
-	for field, value := range map[string]string{"from": from.Address, "to": to.Address, "body": "schema", "encoding": "plain"} {
+	for field, value := range map[string]string{"from": from.Address, "to": to.Address, "body": text, "encoding": encoding} {
 		if err := w.WriteField(field, value); err != nil {
 			t.Fatal(err)
 		}
@@ -167,11 +157,11 @@ func TestDeliveryAndInboxIsolation(t *testing.T) {
 		s.call(t, "POST", path, "", "", "application/json", strings.NewReader("not json"), 401)
 		s.call(t, "POST", path, "gk_invalid", "", "application/json", nil, 401)
 	}
-	a, b := s.mint(t, gateA), s.mint(t, gateB)
+	a, b := s.mint(t, gateA, "{}"), s.mint(t, gateB, "{}")
 	payload := fmt.Sprintf(`{"from":%q,"to":%q,"body":"second"}`, a.Address, b.Address)
 	s.call(t, "POST", "/v1/messages", gateB, b.Secret, "application/json", strings.NewReader(payload), 403)
 	file := []byte{255, 0, 1, 13, 10, 128}
-	first := upload(t, s, a, b, file)
+	first := upload(t, s, a, b, "schema", "plain", file)
 	reply := strings.TrimSuffix(payload, "}") + `,"reply_to":"` + first + `"}`
 	receipt, _ := s.call(t, "POST", "/v1/messages", gateA, a.Secret, "application/json", strings.NewReader(reply), 201)
 	second := unpack[map[string]string](t, receipt)["message_id"]
@@ -224,8 +214,8 @@ func TestSevenDayExpiryAndPersistentInboxes(t *testing.T) {
 	var att string
 	t.Run("send", func(t *testing.T) {
 		s := start(t, cfg)
-		a, b = s.mint(t, gateA), s.mint(t, gateB)
-		upload(t, s, a, b, []byte("blob with a seven-day lifetime"))
+		a, b = s.mint(t, gateA, "{}"), s.mint(t, gateB, "{}")
+		upload(t, s, a, b, "", "plain", []byte("blob with a seven-day lifetime"))
 		body, _ := s.call(t, "GET", b.path("messages"), gateB, b.Secret, "", nil, 200)
 		p := unpack[page](t, body)
 		if len(p.Messages) != 1 || len(p.Messages[0].Attachments) != 1 {
@@ -259,5 +249,5 @@ func TestSevenDayExpiryAndPersistentInboxes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	upload(t, s, a, b, []byte("same permanent addresses after restart and sweep"))
+	upload(t, s, a, b, "", "plain", []byte("same permanent addresses after restart and sweep"))
 }
