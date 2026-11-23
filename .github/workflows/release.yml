@@ -1,0 +1,34 @@
+name: Release binaries
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.4'
+      - name: Test and cross-compile standalone binaries
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          set -eu
+          go test ./...
+          mkdir dist
+          for os in darwin linux windows; do
+            ext=''; if [ "$os" = windows ]; then ext='.exe'; fi
+            for arch in amd64 arm64; do
+              for cmd in dropwire dropwire-relay; do
+                GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/$cmd-$os-$arch$ext" "./cmd/$cmd"
+              done
+            done
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+      - name: Publish binaries and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/*

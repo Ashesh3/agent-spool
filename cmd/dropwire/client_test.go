@@ -115,7 +115,9 @@ func TestPollCursorAndUnreadableMail(t *testing.T) {
 	if err := r.poll(path, o, &out); err != nil {
 		t.Fatal(err)
 	}
-	var page struct { Messages []message `json:"messages"` }
+	var page struct {
+		Messages []message `json:"messages"`
+	}
 	if err := json.Unmarshal(out.Bytes(), &page); err != nil || len(page.Messages) != 2 || page.Messages[0].Body != nil || page.Messages[0].DecryptionError == "" || page.Messages[1].Body == nil || *page.Messages[1].Body != "unblocked" {
 		t.Fatal("invalid per-message output", err)
 	}

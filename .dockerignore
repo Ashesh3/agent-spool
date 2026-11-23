@@ -1,0 +1,9 @@
+**
+!go.mod
+!go.sum
+!cmd
+!cmd/dropwire-relay
+!cmd/dropwire-relay/**
+!internal
+!internal/relay
+!internal/relay/**

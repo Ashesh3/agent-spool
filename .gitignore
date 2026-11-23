@@ -1,0 +1,8 @@
+/dist/
+/.env
+/.env.*
+!/.env.example
+/certs/
+/data/
+/.agent-mailbox.json
+*.exe

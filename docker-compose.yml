@@ -1,0 +1,23 @@
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${BIND_IP:-127.0.0.1}:${RELAY_PORT:-8443}:8443"
+    environment:
+      RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST to the private relay hostname}
+      ALLOWED_GATE_KEYS: ${ALLOWED_GATE_KEYS:?set ALLOWED_GATE_KEYS to label:key pairs}
+      TLS_CERT_FILE: /certs/fullchain.pem
+      TLS_KEY_FILE: /certs/privkey.pem
+      MAX_FILE_BYTES: ${MAX_FILE_BYTES:-26214400}
+      MAX_MESSAGE_BYTES: ${MAX_MESSAGE_BYTES:-52428800}
+      QUOTA_BYTES: ${QUOTA_BYTES:-1073741824}
+      REQUESTS_PER_MINUTE: ${REQUESTS_PER_MINUTE:-120}
+    volumes:
+      - relay-data:/data
+      - "${CERTS_DIR:-./certs}:/certs:ro"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+volumes:
+  relay-data:

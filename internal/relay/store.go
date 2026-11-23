@@ -19,11 +19,11 @@ import (
 )
 
 type Config struct {
-	DataDir, Host                            string
-	GateKeys                                 map[string]string
+	DataDir, Host                             string
+	GateKeys                                  map[string]string
 	MaxFileBytes, MaxMessageBytes, QuotaBytes int64
-	RequestsPerMinute                        int
-	Now                                      func() time.Time
+	RequestsPerMinute                         int
+	Now                                       func() time.Time
 }
 
 type member struct {
