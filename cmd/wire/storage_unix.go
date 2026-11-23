@@ -11,7 +11,7 @@ import (
 )
 
 func privateTemp(dir string) (*os.File, error) {
-	return os.CreateTemp(dir, ".dropwire-*") // 0600 from creation
+	return os.CreateTemp(dir, ".wire-*") // 0600 from creation
 }
 
 func exclusiveLock(f *os.File) error {

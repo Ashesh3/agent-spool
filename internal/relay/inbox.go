@@ -68,7 +68,7 @@ func (r *Relay) poll(w http.ResponseWriter, req *http.Request, inbox string) err
 		var attachments []byte
 		if err := rows.Scan(&id, &m.From, &m.Body, &m.Encoding, &m.ReplyTo, &created, &expires, &attachments); err != nil {
 			if started {
-				log.Printf("dropwire relay: poll read: %v", err)
+				log.Printf("wire relay: poll read: %v", err)
 				panic(http.ErrAbortHandler)
 			}
 			return err
@@ -91,7 +91,7 @@ func (r *Relay) poll(w http.ResponseWriter, req *http.Request, inbox string) err
 	}
 	if err := rows.Err(); err != nil {
 		if started {
-			log.Printf("dropwire relay: poll read: %v", err)
+			log.Printf("wire relay: poll read: %v", err)
 			panic(http.ErrAbortHandler)
 		}
 		return err
@@ -137,7 +137,7 @@ func (r *Relay) download(w http.ResponseWriter, req *http.Request, inbox, id str
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": a.Name}))
 	w.Header().Set("Content-Length", strconv.FormatInt(a.Size, 10))
-	w.Header().Set("X-Dropwire-Encoding", encoding)
+	w.Header().Set("X-Wire-Encoding", encoding)
 	w.WriteHeader(200)
 	if n, err := io.Copy(w, f); err != nil || n != a.Size {
 		panic(http.ErrAbortHandler)
@@ -167,7 +167,7 @@ func (r *Relay) delete(w http.ResponseWriter, req *http.Request, inbox, id strin
 	if err := r.collect(ctx); err != nil {
 		// The logical deletion already committed; its durable unlink queue is
 		// retried by Sweep if a download or transient failure delayed removal.
-		log.Printf("dropwire relay: collect deleted attachments: %v", err)
+		log.Printf("wire relay: collect deleted attachments: %v", err)
 	}
 	w.WriteHeader(204)
 	return nil

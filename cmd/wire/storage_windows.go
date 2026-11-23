@@ -23,7 +23,7 @@ func privateTemp(dir string) (*os.File, error) {
 	}
 	sa := windows.SecurityAttributes{SecurityDescriptor: sd}
 	sa.Length = uint32(unsafe.Sizeof(sa))
-	path := filepath.Join(dir, ".dropwire-"+rand.Text())
+	path := filepath.Join(dir, ".wire-"+rand.Text())
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err

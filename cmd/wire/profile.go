@@ -27,14 +27,14 @@ type profile struct {
 }
 
 func profilePath() (string, error) {
-	if path := os.Getenv("DROPWIRE_CONFIG"); path != "" {
+	if path := os.Getenv("WIRE_CONFIG"); path != "" {
 		return filepath.Abs(path)
 	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "dropwire", "config.json"), nil
+	return filepath.Join(dir, "wire", "config.json"), nil
 }
 
 func origin(s string) (string, error) {
@@ -91,13 +91,13 @@ func lockProfile(path string, create bool) (*os.File, error) {
 	}
 	info, err := os.Stat(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, errors.New("profile not found; run dropwire init first")
+		return nil, errors.New("profile not found; run wire init first")
 	}
 	if err != nil {
 		return nil, err
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0022 != 0 {
-		return nil, errors.New("profile directory must not be writable by group or others; choose a private directory with DROPWIRE_CONFIG")
+		return nil, errors.New("profile directory must not be writable by group or others; choose a private directory with WIRE_CONFIG")
 	}
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
@@ -178,7 +178,7 @@ func provision(path string, p *profile, o options) (*profile, error) {
 	}
 	if p != nil {
 		if relayURL != "" && relayURL != p.Relay {
-			return nil, errors.New("profile already belongs to another relay; select a new DROPWIRE_CONFIG")
+			return nil, errors.New("profile already belongs to another relay; select a new WIRE_CONFIG")
 		}
 		if o.gate != "" && o.gate != p.Gate {
 			if !headerToken(o.gate) {

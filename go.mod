@@ -1,4 +1,4 @@
-module dropwire
+module wire
 
 go 1.26.0
 

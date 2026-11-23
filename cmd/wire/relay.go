@@ -21,17 +21,17 @@ type relay struct {
 
 func newRelay(p *profile) (*relay, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
-	if pemPath := os.Getenv("DROPWIRE_CA_FILE"); pemPath != "" {
+	if pemPath := os.Getenv("WIRE_CA_FILE"); pemPath != "" {
 		pem, err := os.ReadFile(pemPath)
 		if err != nil {
-			return nil, fmt.Errorf("reading DROPWIRE_CA_FILE: %w", err)
+			return nil, fmt.Errorf("reading WIRE_CA_FILE: %w", err)
 		}
 		roots, err := x509.SystemCertPool()
 		if err != nil {
 			return nil, fmt.Errorf("loading system CA certificates: %w", err)
 		}
 		if !roots.AppendCertsFromPEM(pem) {
-			return nil, errors.New("DROPWIRE_CA_FILE contains no readable CA certificates")
+			return nil, errors.New("WIRE_CA_FILE contains no readable CA certificates")
 		}
 		tlsConfig.RootCAs = roots
 	}
@@ -66,7 +66,7 @@ func (r *relay) request(method, path, contentType string, body io.Reader, owned 
 		var n net.Error
 		switch {
 		case errors.As(err, &cert):
-			return nil, errors.New("relay TLS certificate verification failed; check hostname, trust roots, and DROPWIRE_CA_FILE")
+			return nil, errors.New("relay TLS certificate verification failed; check hostname, trust roots, and WIRE_CA_FILE")
 		case errors.As(err, &dns):
 			return nil, errors.New("DNS lookup failed; check relay and proxy settings")
 		case errors.As(err, &n) && n.Timeout():

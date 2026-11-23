@@ -1,4 +1,4 @@
-// Command dropwire-relay serves one private Dropwire address domain.
+// Command wire-relay serves one private wire address domain.
 package main
 
 import (
@@ -17,10 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"dropwire/internal/relay"
+	"wire/internal/relay"
 )
 
-const usage = "dropwire-relay [serve|keygen] [--json]"
+const usage = "wire-relay [serve|keygen] [--json]"
 
 func main() {
 	args := os.Args[1:]

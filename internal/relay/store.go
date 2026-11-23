@@ -1,4 +1,4 @@
-// Package relay implements the private Dropwire mailbox HTTP service.
+// Package relay implements the private wire mailbox HTTP service.
 package relay
 
 import (

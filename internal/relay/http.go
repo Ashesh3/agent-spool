@@ -50,7 +50,7 @@ func handleError(w http.ResponseWriter, err error) {
 	if errors.As(err, &e) {
 		status, text = e.status, e.text
 	} else if !errors.Is(err, context.Canceled) {
-		log.Printf("dropwire relay: %v", err)
+		log.Printf("wire relay: %v", err)
 	}
 	writeJSON(w, status, struct {
 		Error string `json:"error"`
@@ -96,7 +96,7 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	m := r.gate(req)
 	if m == nil {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="dropwire"`)
+		w.Header().Set("WWW-Authenticate", `Bearer realm="wire"`)
 		handleError(w, &httpError{401, "invalid gate key"})
 		return
 	}

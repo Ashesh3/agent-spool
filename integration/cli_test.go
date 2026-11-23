@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"testing"
 
-	"dropwire/internal/relay"
+	"wire/internal/relay"
 )
 
 // Use the real CLI so that credential protection, cursor persistence, native
@@ -22,8 +22,8 @@ func TestNativeClients(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		ext = ".exe"
 	}
-	bin := filepath.Join(dir, "dropwire"+ext)
-	build := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"+ext), "build", "-o", bin, "./cmd/dropwire")
+	bin := filepath.Join(dir, "wire"+ext)
+	build := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"+ext), "build", "-o", bin, "./cmd/wire")
 	build.Dir = ".."
 	if b, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build client: %v: %s", err, b)
@@ -40,7 +40,7 @@ func TestNativeClients(t *testing.T) {
 		if profile == bob {
 			key = gateB
 		}
-		cmd.Env = append(os.Environ(), "DROPWIRE_CONFIG="+profile, "DROPWIRE_CA_FILE="+ca, "RELAY_URL="+s.URL, "GATE_KEY="+key)
+		cmd.Env = append(os.Environ(), "WIRE_CONFIG="+profile, "WIRE_CA_FILE="+ca, "RELAY_URL="+s.URL, "GATE_KEY="+key)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		b, err := cmd.Output()

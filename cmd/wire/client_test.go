@@ -153,7 +153,7 @@ func TestVerifiedGateRotationAndRedirectRefusal(t *testing.T) {
 	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.Certificate().Raw}), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("DROPWIRE_CA_FILE", caPath)
+	t.Setenv("WIRE_CA_FILE", caPath)
 	p, path := makeProfile(t, s.URL)
 	pub.Store(p.identity.Recipient())
 	for _, gate := range []string{"redirect", "rejected", "next"} {

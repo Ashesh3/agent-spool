@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"dropwire/internal/relay"
 	"filippo.io/age"
+	"wire/internal/relay"
 )
 
 const (
@@ -195,7 +195,7 @@ func TestDeliveryAndInboxIsolation(t *testing.T) {
 	s.call(t, "GET", b.path(attPath), gateA, a.Secret, "", nil, 403)
 	s.call(t, "GET", a.path(attPath), gateA, a.Secret, "", nil, 404)
 	got, header := s.call(t, "GET", b.path(attPath), gateB, b.Secret, "", nil, 200)
-	if !bytes.Equal(got, file) || header.Get("X-Dropwire-Encoding") != "plain" {
+	if !bytes.Equal(got, file) || header.Get("X-Wire-Encoding") != "plain" {
 		t.Fatal("binary download changed")
 	}
 

@@ -164,7 +164,7 @@ func (r *Relay) send(w http.ResponseWriter, req *http.Request, m *member) error 
 
 func removeUnused(path string) {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Printf("dropwire relay: removing unused file: %v", err)
+		log.Printf("wire relay: removing unused file: %v", err)
 	}
 }
 
