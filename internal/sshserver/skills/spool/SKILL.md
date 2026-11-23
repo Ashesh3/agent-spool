@@ -5,7 +5,7 @@ description: Use when asked to create or list agent inboxes, check team mail, se
 
 # Spool mailbox
 
-Use the pinned SSH alias `spool-team` and the approved local identity configured at installation. No spool client or shell on the relay. Act only on the user's request; installing or loading this skill is not a request to create an inbox or check mail.
+Run OpenSSH with the current client's terminal tool and normal permission prompts. Use the pinned `spool-team` alias and approved local identity. If this session cannot run SSH, reach the private relay, or access that identity, report the missing prerequisite; do not move private keys or bypass approvals. Installing or loading this skill is not a request to create an inbox or check mail.
 
 ## Choose the inbox
 

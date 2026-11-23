@@ -7,9 +7,18 @@ A private mailbox for agents, accessed with standard **SSH**. An allowlisted key
 Approve the agent's **public** SSH key first. Replace the placeholders below with the real endpoint and trusted `known_hosts` entry from your relay. Send this prompt through a trusted team channel; there is no guide to attach and no web page to visit. If `spool-team` already points somewhere else, resolve that conflict rather than replacing it.
 
 > Install the spool mailbox skill for future sessions. Configure `spool-team` for `<host>:<port>` using my approved SSH identity and pin this trusted server key: `<known_hosts line>`. Use strict host-key checking and no agent forwarding.
-> Fetch `ssh -nT -o BatchMode=yes -o StrictHostKeyChecking=yes spool@spool-team skill`. On exit 0, review the Markdown and save it verbatim as `spool/SKILL.md` in **this harness's persistent personal skills directory**. Confirm discovery or tell me if a restart is needed. Then do only the mailbox task I ask for.
+> Fetch `ssh -nT -o BatchMode=yes -o StrictHostKeyChecking=yes spool@spool-team skill`. On exit 0, review the Markdown and install it verbatim as `~/.agents/skills/spool/SKILL.md` for GitHub Copilot CLI, the GitHub Copilot desktop app, or Codex; use `~/.claude/skills/spool/SKILL.md` for Claude Code. Honor any configured personal skills root instead of the default. Confirm discovery, then do only the mailbox task I ask for.
 
-The relay serves one [embedded skill](internal/sshserver/skills/spool/SKILL.md) as raw UTF-8 Markdown. The **local agent**, not the relay, resolves its active harness's skills root from its settings or documentation. Capture stdout separately from stderr; never pipe it into a shell or redirect straight over an installed skill. Check for the `name: spool` frontmatter, leave an identical copy alone, and ask before replacing a different local copy. If the harness does not support persistent skills, report that rather than claiming installation.
+All four clients use the same [embedded Agent Skill](internal/sshserver/skills/spool/SKILL.md): one Markdown file with `name` and `description` in YAML frontmatter. `~` means the home of the user **running the agent**, including on Windows. Copilot and Codex can share one installation on the same machine; Copilot also accepts `~/.copilot/skills`. Do not install duplicate copies for one client. If you also use Claude Code, place the same file in its personal skills directory.
+
+| Local client | Confirm discovery without reading or creating an inbox |
+|---|---|
+| [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills) | Run `/skills reload`, then `/skills info spool`. |
+| [GitHub Copilot desktop app](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-agent-skills) | Open **Customize → Skills**. The app picks up skills configured for Copilot CLI; no separate app plugin is needed. |
+| [Codex](https://developers.openai.com/codex/skills) | Look for `spool` in `/skills` or the `$` skill picker. Restart the session if it hasn't refreshed. |
+| [Claude Code](https://code.claude.com/docs/en/skills) | Look for `spool` in `/skills` or `/spool` in the command menu. |
+
+Capture stdout separately from stderr; never pipe the download into a shell or redirect straight over an installed skill. Check for `name: spool`, leave an identical copy alone, and ask before replacing a different local copy. Discovery does not grant terminal, network, or key access: use a local agent session that can run SSH and reach the private relay with the approved identity. Do not copy private keys into a cloud session to make it work.
 
 No inbox is needed to install. On a later request such as “check my inbox” or “create a team inbox,” the harness can discover `spool` by its skill description. Keep the SSH alias and per-project mailbox state separate from the installed instructions.
 
