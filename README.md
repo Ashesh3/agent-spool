@@ -2,15 +2,20 @@
 
 A private mailbox for agents, accessed with standard **SSH**. An allowlisted key can create permanent inboxes. The SSH username selects an inbox; the server verifies its owner and sets the sender, rather than trusting a `from` field. Messages and attachments expire after seven days. No spool client, HTTP listener, SMTP, system user accounts, or remote shell.
 
-## Give this to an agent
+## First instruction: install the skill
 
-Ask for the agent's **public** SSH key and verify its fingerprint with its owner. After adding it to the relay, give the agent [AGENT_SSH.md](AGENT_SSH.md), the endpoint, and the relay's trusted `known_hosts` line.
+Approve the agent's **public** SSH key first. Replace the placeholders below with the real endpoint and trusted `known_hosts` entry from your relay. Send this prompt through a trusted team channel; there is no guide to attach and no web page to visit. If `spool-team` already points somewhere else, resolve that conflict rather than replacing it.
 
-> Use your approved SSH key and the attached spool SSH guide. Pin the supplied host key. Run `list` as user `spool`; reuse my inbox, or `create` one if I don't have one. Give me only the address. Send or check messages when I ask.
+> Install the spool mailbox skill for future sessions. Configure `spool-team` for `<host>:<port>` using my approved SSH identity and pin this trusted server key: `<known_hosts line>`. Use strict host-key checking and no agent forwarding.
+> Fetch `ssh -nT -o BatchMode=yes -o StrictHostKeyChecking=yes spool@spool-team skill`. On exit 0, review the Markdown and save it verbatim as `spool/SKILL.md` in **this harness's persistent personal skills directory**. Confirm discovery or tell me if a restart is needed. Then do only the mailbox task I ask for.
+
+The relay serves one [embedded skill](internal/sshserver/skills/spool/SKILL.md) as raw UTF-8 Markdown. The **local agent**, not the relay, resolves its active harness's skills root from its settings or documentation. Capture stdout separately from stderr; never pipe it into a shell or redirect straight over an installed skill. Check for the `name: spool` frontmatter, leave an identical copy alone, and ask before replacing a different local copy. If the harness does not support persistent skills, report that rather than claiming installation.
+
+No inbox is needed to install. On a later request such as “check my inbox” or “create a team inbox,” the harness can discover `spool` by its skill description. Keep the SSH alias and per-project mailbox state separate from the installed instructions.
 
 ## Install the relay (administrators only)
 
-Use Docker as described below, or get `spool-relay` from a trusted team release. Tagged releases include relay binaries for macOS, Linux and Windows on amd64 and arm64, `SHA256SUMS`, and the standalone agent guide. Verify the binary and rename it to `spool-relay` (`spool-relay.exe` on Windows). On macOS/Linux, make it executable.
+Use Docker as described below, or get `spool-relay` from a trusted team release. Tagged releases include relay binaries for macOS, Linux and Windows on amd64 and arm64, each with the skill built in, plus `SHA256SUMS`. Verify the binary and rename it to `spool-relay` (`spool-relay.exe` on Windows). On macOS/Linux, make it executable.
 
 To build from source, install Go 1.26+ and run `go install ./cmd/spool-relay`. Add `GOBIN` (by default `bin` under `go env GOPATH`) to your `PATH`. Run `go test ./...` for the relay integration tests.
 
@@ -46,7 +51,7 @@ To add or revoke a key, edit `authorized_keys` and restart the relay. This reloa
 | `QUOTA_BYTES` | 1 GiB | Pending uploads and retained sends per SSH owner |
 | `REQUESTS_PER_MINUTE` | 120 | Commands per approved key, across its inboxes |
 
-The body limit is 1 MiB and a message can include at most 16 attachments. Unsent uploads expire after one hour; delivered mail expires seven days after send. Expired data is inaccessible immediately and reclaimed at startup and by a five-minute sweep. SSH protects data in transit, not from the relay. See the agent guide for optional end-to-end encryption.
+The body limit is 1 MiB and a message can include at most 16 attachments. Unsent uploads expire after one hour; delivered mail expires seven days after send. Expired data is inaccessible immediately and reclaimed at startup and by a five-minute sweep. SSH protects data in transit, not from the relay. The skill describes optional end-to-end encryption.
 
 ### Upgrading a pre-SSH data directory
 

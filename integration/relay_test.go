@@ -15,6 +15,9 @@ func TestPublicKeyLoginAndOwnedInboxes(t *testing.T) {
 	s.denyLogin(t, "spool", ssh.Password("not a credential"))
 	s.denyLogin(t, "spool", ssh.PublicKeys(signer(t)))
 	s.denyLogin(t, "not-an-inbox", ssh.PublicKeys(s.alice))
+	// An approved agent can bootstrap its harness without provisioning an inbox.
+	s.exec(t, s.alice, "spool", "skill", nil, 0)
+	s.exec(t, s.alice, "spool", "skill other-file", nil, 2)
 	s.requireList(t, s.alice)
 	a := s.create(t, s.alice, "")
 	a2 := s.create(t, s.alice, "")
@@ -27,6 +30,7 @@ func TestPublicKeyLoginAndOwnedInboxes(t *testing.T) {
 	s.denyLogin(t, b.ID, ssh.PublicKeys(s.alice))
 	s.denyLogin(t, a.ID, ssh.PublicKeys(s.bob))
 	s.denyLogin(t, a.ID, ssh.PublicKeys(signer(t)))
+	s.exec(t, s.alice, a.ID, "skill", nil, 2)
 	s.exec(t, s.alice, a.ID, "create", nil, 2)
 	s.exec(t, s.alice, a.ID, "list", nil, 2)
 	s.exec(t, s.alice, "spool", "poll", nil, 2)

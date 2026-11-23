@@ -2,6 +2,7 @@ package sshserver
 
 import (
 	"context"
+	_ "embed"
 	"strconv"
 	"strings"
 	"unicode"
@@ -10,8 +11,11 @@ import (
 	"spool/internal/relay"
 )
 
+//go:embed skills/spool/SKILL.md
+var skillMarkdown []byte
+
 const (
-	managementCommands = usageError("spool commands: create, list, pubkey")
+	managementCommands = usageError("spool commands: skill, create, list, pubkey")
 	inboxCommands      = usageError("inbox commands: put, send, poll, get, delete")
 	sendUsage          = usageError("usage: send <recipient> [--attach <id>]... [--reply-to <message_id>] [--encoding plain|age]")
 	pollUsage          = usageError("usage: poll [--since <cursor>] [--limit <1..100>]")
@@ -71,6 +75,12 @@ func (s *session) run(ctx context.Context, line string) error {
 
 func (s *session) manage(ctx context.Context, verb string, args []string) error {
 	switch verb {
+	case "skill":
+		if len(args) != 0 {
+			return usageError("usage: skill")
+		}
+		_, err := s.ch.Write(skillMarkdown)
+		return err
 	case "create":
 		var key string
 		switch {
