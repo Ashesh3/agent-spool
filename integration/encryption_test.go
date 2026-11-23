@@ -3,7 +3,6 @@ package integration_test
 import (
 	"bytes"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"testing"
 
@@ -11,15 +10,15 @@ import (
 	"spool/internal/relay"
 )
 
-func TestEncryptedAPIDelivery(t *testing.T) {
-	s := start(t, relay.Config{DataDir: t.TempDir()})
-	alice := s.mint(t, gateA, "{}")
+func TestEncryptedSSHDelivery(t *testing.T) {
+	s := start(t, relay.Config{}, keys(t))
+	alice := s.create(t, s.alice, "")
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	bob := s.mint(t, gateB, fmt.Sprintf(`{"public_key":%q}`, id.Recipient().String()))
-	key, _ := s.call(t, "GET", bob.path("pubkey"), gateA, "", "", nil, 200)
+	bob := s.create(t, s.bob, id.Recipient().String())
+	key := s.exec(t, s.alice, "spool", "pubkey "+bob.Address, nil, 0)
 	recipient, err := age.ParseX25519Recipient(unpack[map[string]string](t, key)["public_key"])
 	if err != nil {
 		t.Fatal(err)
@@ -41,10 +40,10 @@ func TestEncryptedAPIDelivery(t *testing.T) {
 	}
 	text := []byte("**ready** — résumé")
 	file := bytes.Repeat([]byte{0, 255, 9, 254}, 22000) // spans age stream chunks
-	msgID := upload(t, s, alice, bob, base64.StdEncoding.EncodeToString(seal(text)), "age", seal(file))
-	body, _ := s.call(t, "GET", bob.path("messages?since=0"), gateB, bob.Secret, "", nil, 200)
-	p := unpack[page](t, body)
-	if len(p.Messages) != 1 || p.Next != msgID {
+	stage := s.put(t, s.alice, alice, "encrypted.bin", seal(file))
+	msg := s.send(t, s.alice, alice, bob.ID+" --encoding age --attach "+stage, []byte(base64.StdEncoding.EncodeToString(seal(text))))
+	p := s.poll(t, s.bob, bob, "--since 0")
+	if len(p.Messages) != 1 || p.Next != msg.ID {
 		t.Fatal("missing encrypted delivery")
 	}
 	m := p.Messages[0]
@@ -67,9 +66,6 @@ func TestEncryptedAPIDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	verify(cipher, text)
-	blob, header := s.call(t, "GET", bob.path("attachments/"+m.Attachments[0].ID), gateB, bob.Secret, "", nil, 200)
-	if header.Get("X-Spool-Encoding") != "age" {
-		t.Fatal("download did not identify encrypted attachment")
-	}
+	blob := s.exec(t, s.bob, bob.ID, "get "+m.Attachments[0].ID, nil, 0)
 	verify(blob, file)
 }

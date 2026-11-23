@@ -1,12 +1,12 @@
 # spool
 
-A private, pull-based mailbox for agents. Each agent gets a stable `handle@relay-host` address; only the owning agent can poll it. There is no SMTP, public signup, federation, or background process on a client. Messages and attachments expire after seven days.
+A private mailbox for agents, accessed with standard **SSH**. An allowlisted key can create permanent inboxes. The SSH username selects an inbox; the server verifies its owner and sets the sender, rather than trusting a `from` field. Messages and attachments expire after seven days. No spool client, HTTP listener, SMTP, system user accounts, or remote shell.
 
 ## Give this to an agent
 
-Hand the agent [AGENT_API.md](AGENT_API.md) and supply `RELAY_URL` and `GATE_KEY` through its private environment or secret store. No spool executable, SDK, or background process is needed on the agent's machine.
+Ask for the agent's **public** SSH key and verify its fingerprint with its owner. After adding it to the relay, give the agent [AGENT_SSH.md](AGENT_SSH.md), the endpoint, and the relay's trusted `known_hosts` line.
 
-> Use the attached spool guide and your HTTPS tool with `RELAY_URL` and `GATE_KEY`. Reuse my saved inbox or provision one, save the credentials privately, and give me only the address. Send or check mail when I ask.
+> Use your approved SSH key and the attached spool SSH guide. Pin the supplied host key. Run `list` as user `spool`; reuse my inbox, or `create` one if I don't have one. Give me only the address. Send or check messages when I ask.
 
 ## Install the relay (administrators only)
 
@@ -16,29 +16,42 @@ To build from source, install Go 1.26+ and run `go install ./cmd/spool-relay`. A
 
 ## Run a private relay
 
-1. Choose a stable internal DNS hostname and a private network boundary (team LAN, VPN, or authenticated tunnel). **Do not publish the listener to the public internet.** Routing uses `RELAY_HOST`, not the request's `Host` header; do not change the domain of an existing store.
-2. Obtain a trusted TLS certificate for that host. Put the certificate chain in `certs/fullchain.pem` and the private key in `certs/privkey.pem`, or set `CERTS_DIR` to a different directory. Docker Desktop may prompt to share that directory: share only the certificate folder, not your home directory. The container's UID/GID `65532` must be able to traverse it and read both files; restrict the key to that user/group. With a private CA, configure the agent's HTTP tool to trust that CA. Do not disable certificate verification.
-3. Run `spool-relay keygen` once per member. With only Docker installed: `docker build -t spool-relay .` then `docker run --rm spool-relay keygen`. Create a private `.env` next to `docker-compose.yml`:
+1. Choose an internal DNS name on a LAN or VPN. Keep `RELAY_HOST` stable: it is the domain of all addresses and does not include the port. Do not expose the listener to the public internet.
+2. Create `ssh-config/authorized_keys`, with **one approved OpenSSH public key per line**, as in an `id_ed25519.pub` file. Blank lines and comments are fine; use plain keys without `authorized_keys` options or certificates. Comments do not grant identity. Never collect private keys or mount your entire `.ssh` directory.
+3. Set the Compose options in a `.env` next to `docker-compose.yml`:
 
    ```dotenv
    RELAY_HOST=mail.team.example
-   ALLOWED_GATE_KEYS=alice:gk_<alice-hex>,bob:gk_<bob-hex>
-   # Defaults to 127.0.0.1; set to the host's VPN/private interface for remote teammates.
+   # Loopback by default. Use the host's private/VPN interface for remote agents.
    BIND_IP=127.0.0.1
-   RELAY_PORT=8443
+   RELAY_PORT=2222
    ```
 
-4. `docker compose up --build -d`. `GET https://mail.team.example:8443/healthz` should return 200 from the authorized network. Spool data is on the `relay-data` named volume; keep it when recreating the container. Do not scale this deployment beyond **one relay per data directory**.
-5. Give each teammate their own Gate Key and the onboarding prompt above. To revoke a key, remove its entry in `.env` and run `docker compose up -d --force-recreate`. To rotate, replace the key under the same label, recreate the relay, and update the agent's stored Gate Key. Keep the same inbox ID, secret and cursor. Any active gate plus an inbox's secret is sufficient for that inbox; revocation does not destroy the inbox or recall downloaded data.
+4. Run `docker compose up --build -d` and read `docker compose logs relay`. The relay creates its Ed25519 **host** identity on first start and logs only its public `host_key` and `host_fingerprint`. Use the logged public key to prepare this line and give it to agents **through a trusted channel**, substituting the actual host, port and key:
 
-**Native hosting:** set `RELAY_HOST`, `ALLOWED_GATE_KEYS`, `TLS_CERT_FILE` and `TLS_KEY_FILE` in the process environment and run `spool-relay serve`. Native defaults: `LISTEN_ADDR=127.0.0.1:8443`, `DATA_DIR=./data`. Compose `.env` substitution does not automatically set variables for a native process. Both deployment modes terminate TLS directly. A reverse proxy must use HTTPS to the upstream, too.
+   ```text
+   [mail.team.example]:2222 ssh-ed25519 <base64-host-public-key>
+   ```
 
-| Environment setting | Default | Applies to |
+5. The `relay-data` volume holds the host private key, SQLite database and blobs. Back it up privately; keep the same volume across upgrades and run only one relay per data directory. The container runs as UID/GID `65532` and must be able to read the allowlist. Docker Desktop only needs permission to share the `ssh-config` directory (override with `SSH_CONFIG_DIR`).
+
+To add or revoke a key, edit `authorized_keys` and restart the relay. This reloads the allowlist and ends existing sessions. A replacement key has a different owner fingerprint: adding it does **not** silently transfer inboxes. Agents sharing a key share ownership; use distinct keys for isolation.
+
+**Native hosting:** supply `RELAY_HOST` and run `spool-relay serve`. Native defaults are `LISTEN_ADDR=127.0.0.1:2222`, `DATA_DIR=./data` and `AUTHORIZED_KEYS_FILE=ssh-config/authorized_keys`. Compose `.env` substitution does not set environment variables for a native process. Protect the data directory for the service account (including its ACL on Windows). To use an existing server identity instead of the generated `DATA_DIR/ssh_host_ed25519_key`, set `SSH_HOST_KEY_FILE` to a private key readable by that account. In Compose, supply its mount path, e.g. `/config/host_key`. Missing or unreadable configured keys are errors.
+
+| Limit | Default | Applies to |
 |---|---:|---|
-| `MAX_FILE_BYTES` | 26,214,400 | Each stored attachment (25 MiB) |
-| `MAX_MESSAGE_BYTES` | 52,428,800 | Body + stored attachments (50 MiB) |
-| `QUOTA_BYTES` | 1,073,741,824 | Retained payload bytes per sending member label |
-| `REQUESTS_PER_MINUTE` | 120 | Requests per valid Gate Key |
+| `MAX_FILE_BYTES` | 25 MiB | Each uploaded file |
+| `MAX_MESSAGE_BYTES` | 50 MiB | Body plus attachments |
+| `QUOTA_BYTES` | 1 GiB | Pending uploads and retained sends per SSH owner |
+| `REQUESTS_PER_MINUTE` | 120 | Commands per approved key, across its inboxes |
 
-File/message caps include encryption overhead. The stored body is capped at 1 MiB, including base64; at most 16 files per message. Poll/download stop exposing expired content at seven days; the startup sweep and five-minute timer reclaim it from storage. Inbox credentials and addresses do not expire. The TTL does not delete recipients' downloads or backups; choose backup retention separately.
+The body limit is 1 MiB and a message can include at most 16 attachments. Unsent uploads expire after one hour; delivered mail expires seven days after send. Expired data is inaccessible immediately and reclaimed at startup and by a five-minute sweep. SSH protects data in transit, not from the relay. See the agent guide for optional end-to-end encryption.
 
+### Upgrading a pre-SSH data directory
+
+The old database does **not** say which SSH key owns an inbox. No key can claim one by knowing its address, and no HTTP compatibility listener is available.
+
+1. Stop the old relay and back up its entire data directory (including the SQLite files and blobs). Keep the same data directory and `RELAY_HOST`.
+2. Verify ownership with your members. Create `ssh-config/legacy-owners` with one line per existing inbox: `<inbox_id> <SSH SHA256 fingerprint>`. Use the handle, not the full address. Get fingerprints with `ssh-keygen -lf member.pub -E sha256`. Each fingerprint must belong to an approved key.
+3. For the first SSH startup set `LEGACY_OWNERS_FILE` to that file (`/config/legacy-owners` inside Compose). A missing or incomplete mapping does not assign any inboxes. Migration preserves inbox IDs, age public keys, messages and attachments; it retires the old secrets. Remove the migration setting after success. Restore the backup, not the migrated database, if you must roll back.

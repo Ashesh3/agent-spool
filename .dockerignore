@@ -7,3 +7,5 @@
 !internal
 !internal/relay
 !internal/relay/**
+!internal/sshserver
+!internal/sshserver/**

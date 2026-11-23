@@ -1,13 +1,12 @@
 package relay
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
-	"mime"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,134 +25,131 @@ type messageView struct {
 	Attachments json.RawMessage `json:"attachments"`
 }
 
-const pageQuery = `SELECT m.id, m.sender, m.body, m.encoding, m.reply_to, m.created, m.expires,
+const messageQuery = `SELECT m.sender, m.body, m.encoding, m.reply_to, m.created, m.expires,
  (SELECT json_group_array(json_object('attachment_id',a.id,'filename',a.filename,'size',a.size) ORDER BY a.rowid)
   FROM attachments a WHERE a.message_id=m.id)
- FROM messages m WHERE m.recipient=? AND m.id>? AND m.expires>? ORDER BY m.id LIMIT ?`
+ FROM messages m WHERE m.id=? AND m.recipient=? AND m.expires>?`
 
-func (r *Relay) poll(w http.ResponseWriter, req *http.Request, inbox string) error {
-	q := req.URL.Query()
-	var since int64
-	if q.Has("since") {
-		var ok bool
-		since, ok = decimalID(q.Get("since"))
-		if !ok {
-			return bad("invalid since cursor")
-		}
+func (r *Relay) Poll(ctx context.Context, owner, id string, since int64, limit int, out io.Writer) error {
+	if err := r.requireOwner(ctx, owner, id); err != nil {
+		return err
 	}
-	limit := 50
-	if q.Has("limit") {
-		n, ok := decimalID(q.Get("limit"))
-		if !ok || n < 1 || n > 100 {
-			return bad("limit must be between 1 and 100")
-		}
-		limit = int(n)
+	if since < 0 || limit < 1 || limit > 100 {
+		return RequestError("invalid cursor or poll limit")
 	}
-	// A single SELECT provides a consistent view of messages and attachments.
-	// Encode each message before advancing instead of buffering 100 large bodies.
-	rows, err := r.db.QueryContext(req.Context(), pageQuery, inbox, since, r.cfg.Now().UnixNano(), limit)
+	if out == nil {
+		return errors.New("no poll output writer")
+	}
+	// Capture a bounded page of IDs, not 100 MiB of bodies. Fetch each body
+	// and its attachment metadata in a single SELECT and release the DB before
+	// writing to a potentially slow client. Concurrent deletions are skipped.
+	rows, err := r.db.QueryContext(ctx, `SELECT id FROM messages WHERE recipient=? AND id>? AND expires>? ORDER BY id LIMIT ?`,
+		id, since, r.cfg.Now().UnixNano(), limit)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	cursor := strconv.FormatInt(since, 10)
-	address := inbox + "@" + r.cfg.Host
-	started := false
+	ids := make([]int64, 0, limit)
 	for rows.Next() {
-		var m messageView
-		var id, created, expires int64
-		var attachments []byte
-		if err := rows.Scan(&id, &m.From, &m.Body, &m.Encoding, &m.ReplyTo, &created, &expires, &attachments); err != nil {
-			if started {
-				log.Printf("spool relay: poll read: %v", err)
-				panic(http.ErrAbortHandler)
-			}
+		var n int64
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
 			return err
 		}
-		m.ID = strconv.FormatInt(id, 10)
+		ids = append(ids, n)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, `{"messages":[`); err != nil {
+		return err
+	}
+	enc := json.NewEncoder(out)
+	enc.SetEscapeHTML(false)
+	cursor := since
+	address := id + "@" + r.cfg.Host
+	for _, n := range ids {
+		var m messageView
+		var created, expires int64
+		var attachments []byte
+		err := r.db.QueryRowContext(ctx, messageQuery, n, id, r.cfg.Now().UnixNano()).Scan(
+			&m.From, &m.Body, &m.Encoding, &m.ReplyTo, &created, &expires, &attachments)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		m.ID = strconv.FormatInt(n, 10)
 		m.From += "@" + r.cfg.Host
 		m.To = address
 		m.Created, m.Expires = time.Unix(0, created).UTC(), time.Unix(0, expires).UTC()
 		m.Attachments = attachments
-		if !started {
-			writeFragment(w, `{"messages":[`)
-			started = true
-		} else {
-			writeFragment(w, ",")
+		if cursor != since {
+			if _, err := io.WriteString(out, ","); err != nil {
+				return err
+			}
 		}
-		if err := enc.Encode(m); err != nil {
-			panic(http.ErrAbortHandler)
+		if err := enc.Encode(&m); err != nil {
+			return err
 		}
-		cursor = m.ID
+		cursor = n
 	}
-	if err := rows.Err(); err != nil {
-		if started {
-			log.Printf("spool relay: poll read: %v", err)
-			panic(http.ErrAbortHandler)
-		}
-		return err
-	}
-	if !started {
-		writeFragment(w, `{"messages":[`)
-	}
-	// cursor is an internally generated nonnegative decimal, never raw input.
-	writeFragment(w, `],"next_cursor":"`+cursor+`"}`)
-	return nil
+	_, err = io.WriteString(out, `],"next_cursor":"`+strconv.FormatInt(cursor, 10)+`"}`+"\n")
+	return err
 }
 
-func writeFragment(w io.Writer, s string) {
-	if _, err := io.WriteString(w, s); err != nil {
-		panic(http.ErrAbortHandler)
-	}
-}
-
-func (r *Relay) openAttachment(req *http.Request, inbox, id string) (*os.File, attachment, string, error) {
+func (r *Relay) openAttachment(ctx context.Context, inbox, id string) (*os.File, int64, error) {
 	r.files.Lock()
 	defer r.files.Unlock()
-	var a attachment
-	var encoding string
-	err := r.db.QueryRowContext(req.Context(), `SELECT a.id,a.filename,a.size,m.encoding FROM attachments a
-	 JOIN messages m ON m.id=a.message_id WHERE a.id=? AND m.recipient=? AND m.expires>?`, id, inbox, r.cfg.Now().UnixNano()).Scan(&a.ID, &a.Name, &a.Size, &encoding)
+	var size int64
+	err := r.db.QueryRowContext(ctx, `SELECT a.size FROM attachments a JOIN messages m ON m.id=a.message_id
+		WHERE a.id=? AND m.recipient=? AND m.expires>?`, id, inbox, r.cfg.Now().UnixNano()).Scan(&size)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, a, "", missing("attachment not found")
+		return nil, 0, RequestError("attachment not found")
 	}
 	if err != nil {
-		return nil, a, "", err
+		return nil, 0, err
 	}
-	// Only a generated ID read from committed metadata is used as a disk path.
-	f, err := os.Open(filepath.Join(r.blobs, a.ID))
-	return f, a, encoding, err
+	f, err := os.Open(filepath.Join(r.blobs, id))
+	return f, size, err
 }
 
-func (r *Relay) download(w http.ResponseWriter, req *http.Request, inbox, id string) error {
-	f, a, encoding, err := r.openAttachment(req, inbox, id)
+func (r *Relay) Get(ctx context.Context, owner, id, attachmentID string, out io.Writer) error {
+	if err := r.requireOwner(ctx, owner, id); err != nil {
+		return err
+	}
+	if !validID(attachmentID) {
+		return RequestError("invalid attachment ID")
+	}
+	if out == nil {
+		return errors.New("no attachment output writer")
+	}
+	f, size, err := r.openAttachment(ctx, id, attachmentID)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": a.Name}))
-	w.Header().Set("Content-Length", strconv.FormatInt(a.Size, 10))
-	w.Header().Set("X-Spool-Encoding", encoding)
-	w.WriteHeader(200)
-	if n, err := io.Copy(w, f); err != nil || n != a.Size {
-		panic(http.ErrAbortHandler)
+	n, err := io.Copy(out, f)
+	if err == nil && n != size {
+		return errors.New("attachment size differs from metadata")
 	}
-	return nil
+	return err
 }
 
-func (r *Relay) delete(w http.ResponseWriter, req *http.Request, inbox, id string) error {
-	n, ok := decimalID(id)
-	if !ok || n == 0 {
-		return bad("invalid message ID")
+func (r *Relay) Delete(ctx context.Context, owner, id, msgID string) error {
+	if err := r.requireOwner(ctx, owner, id); err != nil {
+		return err
+	}
+	n, ok := decimalID(msgID)
+	if !ok {
+		return RequestError("invalid message ID")
 	}
 	r.files.Lock()
 	defer r.files.Unlock()
-	ctx := req.Context()
-	res, err := r.db.ExecContext(ctx, "DELETE FROM messages WHERE id=? AND recipient=? AND expires>?", n, inbox, r.cfg.Now().UnixNano())
+	res, err := r.db.ExecContext(ctx, "DELETE FROM messages WHERE id=? AND recipient=? AND expires>?", n, id, r.cfg.Now().UnixNano())
 	if err != nil {
 		return err
 	}
@@ -162,13 +158,11 @@ func (r *Relay) delete(w http.ResponseWriter, req *http.Request, inbox, id strin
 		return err
 	}
 	if count == 0 {
-		return missing("message not found")
+		return RequestError("message not found")
 	}
 	if err := r.collect(ctx); err != nil {
-		// The logical deletion already committed; its durable unlink queue is
-		// retried by Sweep if a download or transient failure delayed removal.
+		// Queued unlinks remain durable; the logical deletion already succeeded.
 		log.Printf("spool relay: collect deleted attachments: %v", err)
 	}
-	w.WriteHeader(204)
 	return nil
 }

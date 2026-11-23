@@ -3,24 +3,25 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
+	"net"
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
 	"spool/internal/relay"
+	"spool/internal/sshserver"
+
+	"golang.org/x/crypto/ssh"
 )
 
-const usage = "spool-relay [serve|keygen] [--json]"
+const usage = "spool-relay [serve] [--json]"
 
 func main() {
 	args := os.Args[1:]
@@ -51,15 +52,6 @@ func run(args []string, asJSON bool) error {
 		}
 		fmt.Println(usage)
 		return nil
-	case "keygen":
-		var buf [32]byte
-		rand.Read(buf[:])
-		key := "gk_" + hex.EncodeToString(buf[:])
-		if asJSON {
-			return json.NewEncoder(os.Stdout).Encode(map[string]string{"gate_key": key})
-		}
-		_, err := fmt.Fprintln(os.Stdout, key)
-		return err
 	case "serve":
 		s, err := loadSettings()
 		if err != nil {
@@ -72,22 +64,19 @@ func run(args []string, asJSON bool) error {
 }
 
 func serve(s settings, asJSON bool) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	app, err := relay.Open(s.Config)
 	if err != nil {
 		return err
 	}
 	defer app.Close()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	hostKey, err := loadHostKey(s.DataDir, s.hostKeyFile)
+	if err != nil {
+		return fmt.Errorf("host key: %w", err)
+	}
 	if err := app.Sweep(ctx); err != nil {
 		return fmt.Errorf("startup sweep: %w", err)
-	}
-	server := &http.Server{
-		Addr: s.listen, Handler: app,
-		TLSConfig:                    &tls.Config{MinVersion: tls.VersionTLS12},
-		DisableGeneralOptionsHandler: true, // OPTIONS * must pass through the gate, too.
-		ReadHeaderTimeout:            10 * time.Second, ReadTimeout: 5 * time.Minute,
-		WriteTimeout: 5 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
 	}
 	emit := func(event, detail string) {
 		if asJSON {
@@ -96,37 +85,36 @@ func serve(s settings, asJSON bool) error {
 			log.Printf("%s: %s", event, detail)
 		}
 	}
-	// Load the certificate and acquire the port before reporting readiness.
-	cert, err := tls.LoadX509KeyPair(s.cert, s.key)
-	if err != nil {
-		return fmt.Errorf("load TLS certificate: %w", err)
-	}
-	server.TLSConfig.Certificates = []tls.Certificate{cert}
-	listener, err := tls.Listen("tcp", s.listen, server.TLSConfig)
+	listener, err := net.Listen("tcp", s.listen)
 	if err != nil {
 		return err
 	}
-	done := make(chan error, 1)
-	go func() { done <- server.Serve(listener) }()
+	emit("host_key", strings.TrimSpace(string(ssh.MarshalAuthorizedKey(hostKey.PublicKey()))))
+	emit("host_fingerprint", ssh.FingerprintSHA256(hostKey.PublicKey()))
 	emit("listening", listener.Addr().String())
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case err := <-done:
-			return err
-		case <-ticker.C:
-			if err := app.Sweep(ctx); err != nil && ctx.Err() == nil {
-				emit("cleanup error", err.Error())
+
+	sweepCtx, cancel := context.WithCancel(ctx)
+	swept := make(chan struct{})
+	go func() {
+		defer close(swept)
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := app.Sweep(sweepCtx); err != nil && sweepCtx.Err() == nil {
+					emit("cleanup error", err.Error())
+				}
+			case <-sweepCtx.Done():
+				return
 			}
-		case <-ctx.Done():
-			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := server.Shutdown(shutdown); err != nil {
-				_ = server.Close()
-				return err
-			}
-			return nil
 		}
+	}()
+	err = sshserver.Serve(ctx, listener, app, hostKey, s.allowed)
+	cancel()
+	<-swept
+	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		return nil
 	}
+	return err
 }

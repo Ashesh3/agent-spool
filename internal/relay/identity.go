@@ -1,0 +1,184 @@
+package relay
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"strconv"
+	"strings"
+	"time"
+
+	"filippo.io/age"
+)
+
+// RequestError is safe to return to a client. Database and OS errors are not.
+type RequestError string
+
+func (e RequestError) Error() string { return string(e) }
+
+const notOwner = RequestError("inbox unavailable for this SSH key")
+
+type Inbox struct {
+	ID      string `json:"inbox_id"`
+	Address string `json:"address"`
+}
+
+func validOwner(owner string) bool {
+	s, ok := strings.CutPrefix(owner, "SHA256:")
+	if !ok || len(s) != base64.RawStdEncoding.EncodedLen(sha256.Size) {
+		return false
+	}
+	var digest [sha256.Size]byte
+	n, err := base64.RawStdEncoding.Strict().Decode(digest[:], []byte(s))
+	return err == nil && n == len(digest)
+}
+
+func validID(id string) bool {
+	if len(id) == 0 || len(id) > 128 {
+		return false
+	}
+	for i := range len(id) {
+		c := id[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || i > 0 && (c == '-' || c == '_')) {
+			return false
+		}
+	}
+	return true
+}
+
+func decimalID(s string) (int64, bool) {
+	n, err := strconv.ParseInt(s, 10, 64)
+	return n, err == nil && n > 0 && s[0] >= '1' && s[0] <= '9'
+}
+
+// IDs are opaque, local handles; addresses are routing labels, not destinations
+// to connect to. No relay-to-relay routing or domain lookup takes place.
+func (r *Relay) localID(address string) (string, error) {
+	id, host, full := strings.Cut(address, "@")
+	if !validID(id) || full && !strings.EqualFold(host, r.cfg.Host) {
+		return "", RequestError("expected a local recipient handle or address")
+	}
+	return id, nil
+}
+
+func (r *Relay) memberLocked(owner string) *member {
+	m := r.members[owner]
+	if m == nil {
+		m = &member{upload: make(chan struct{}, 1)}
+		r.members[owner] = m
+	}
+	return m
+}
+
+// Allow charges exactly one exec request for an authenticated fingerprint.
+func (r *Relay) Allow(owner string) bool {
+	if !validOwner(owner) {
+		return false
+	}
+	r.membersMu.Lock()
+	defer r.membersMu.Unlock()
+	m := r.memberLocked(owner)
+	now := r.cfg.Now()
+	if !now.Before(m.until) {
+		m.until, m.count = now.Add(time.Minute), 0
+	}
+	if m.count >= r.cfg.RequestsPerMinute {
+		return false
+	}
+	m.count++
+	return true
+}
+
+func (r *Relay) Owns(ctx context.Context, owner, id string) (bool, error) {
+	if !validOwner(owner) || !validID(id) {
+		return false, nil
+	}
+	var ok bool
+	err := r.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM inboxes WHERE owner=? AND id=?)", owner, id).Scan(&ok)
+	return ok, err
+}
+
+func (r *Relay) requireOwner(ctx context.Context, owner, id string) error {
+	ok, err := r.Owns(ctx, owner, id)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return notOwner
+	}
+	return nil
+}
+
+func newHandle() string {
+	adjectives := [...]string{"amber", "brisk", "coral", "dusk", "fern", "lunar", "opal", "swift"}
+	animals := [...]string{"crane", "finch", "fox", "hare", "ibis", "lynx", "otter", "wren"}
+	var b [10]byte
+	rand.Read(b[:])
+	return adjectives[b[0]%8] + "-" + animals[b[1]%8] + "-" + hex.EncodeToString(b[2:])
+}
+
+func (r *Relay) Create(ctx context.Context, owner, publicKey string) (Inbox, error) {
+	if !validOwner(owner) {
+		return Inbox{}, notOwner
+	}
+	if publicKey != "" {
+		if len(publicKey) != 62 {
+			return Inbox{}, RequestError("expected an age X25519 public key")
+		}
+		key, err := age.ParseX25519Recipient(publicKey)
+		if err != nil || key.String() != publicKey {
+			return Inbox{}, RequestError("expected an age X25519 public key")
+		}
+	}
+	for {
+		id := newHandle()
+		res, err := r.db.ExecContext(ctx, `INSERT INTO inboxes(id,owner,public_key) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`, id, owner, publicKey)
+		if err != nil {
+			return Inbox{}, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return Inbox{}, err
+		}
+		if n != 0 {
+			return Inbox{id, id + "@" + r.cfg.Host}, nil
+		}
+	}
+}
+
+func (r *Relay) List(ctx context.Context, owner string) ([]Inbox, error) {
+	if !validOwner(owner) {
+		return nil, notOwner
+	}
+	rows, err := r.db.QueryContext(ctx, "SELECT id FROM inboxes WHERE owner=? ORDER BY id", owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	inboxes := []Inbox{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		inboxes = append(inboxes, Inbox{id, id + "@" + r.cfg.Host})
+	}
+	return inboxes, rows.Err()
+}
+
+func (r *Relay) PublicKey(ctx context.Context, recipient string) (string, error) {
+	id, err := r.localID(recipient)
+	if err != nil {
+		return "", err
+	}
+	var key string
+	err = r.db.QueryRowContext(ctx, "SELECT public_key FROM inboxes WHERE id=?", id).Scan(&key)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && key == "" {
+		return "", RequestError("no public key for this inbox")
+	}
+	return key, err
+}

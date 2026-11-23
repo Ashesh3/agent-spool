@@ -2,252 +2,173 @@ package integration_test
 
 import (
 	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"io/fs"
-	"mime/multipart"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"sync/atomic"
+	"net"
 	"testing"
-	"time"
 
+	"golang.org/x/crypto/ssh"
 	"spool/internal/relay"
 )
 
-const (
-	gateA = "gk_f8230000000000000000000000000011"
-	gateB = "gk_90990000000000000000000000000022"
-)
-
-type harness struct {
-	*httptest.Server
-	app *relay.Relay
+func TestPublicKeyLoginAndOwnedInboxes(t *testing.T) {
+	s := start(t, relay.Config{}, keys(t))
+	s.denyLogin(t, "spool")
+	s.denyLogin(t, "spool", ssh.Password("not a credential"))
+	s.denyLogin(t, "spool", ssh.PublicKeys(signer(t)))
+	s.denyLogin(t, "not-an-inbox", ssh.PublicKeys(s.alice))
+	s.requireList(t, s.alice)
+	a := s.create(t, s.alice, "")
+	a2 := s.create(t, s.alice, "")
+	b := s.create(t, s.bob, "")
+	if a == a2 {
+		t.Fatal("create returned the same inbox twice")
+	}
+	s.requireList(t, s.alice, a, a2)
+	s.requireList(t, s.bob, b)
+	s.denyLogin(t, b.ID, ssh.PublicKeys(s.alice))
+	s.denyLogin(t, a.ID, ssh.PublicKeys(s.bob))
+	s.denyLogin(t, a.ID, ssh.PublicKeys(signer(t)))
+	s.exec(t, s.alice, a.ID, "create", nil, 2)
+	s.exec(t, s.alice, a.ID, "list", nil, 2)
+	s.exec(t, s.alice, "spool", "poll", nil, 2)
+	s.exec(t, s.alice, "spool", "send "+b.ID, []byte("no sender"), 2)
+	s.exec(t, s.alice, a.ID, "send "+b.ID+" --from "+b.Address, []byte("forged"), 2)
+	if p := s.poll(t, s.bob, b, ""); len(p.Messages) != 0 {
+		t.Fatal("rejected send published a message")
+	}
 }
 
-func start(t *testing.T, cfg relay.Config) *harness {
-	t.Helper()
-	cfg.Host = "team.test"
-	cfg.GateKeys = map[string]string{"alice": gateA, "bob": gateB}
-	app, err := relay.Open(cfg)
+func TestSSHHasNoInteractiveOrForwardingServices(t *testing.T) {
+	s := start(t, relay.Config{}, keys(t))
+	for _, tc := range []struct {
+		name    string
+		request func(*ssh.Session) error
+	}{
+		{"shell", (*ssh.Session).Shell},
+		{"sftp", func(session *ssh.Session) error { return session.RequestSubsystem("sftp") }},
+		{"pty", func(session *ssh.Session) error { return session.RequestPty("xterm", 24, 80, nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := s.client(t, s.alice, "spool")
+			defer c.Close()
+			session, err := c.NewSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			if err := tc.request(session); err == nil {
+				t.Fatal("session request unexpectedly accepted")
+			}
+		})
+	}
+	// Use a reachable destination so that an ordinary connect failure cannot
+	// conceal an implementation that permits direct-tcpip channels.
+	target, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := httptest.NewTLSServer(app)
-	t.Cleanup(func() {
-		s.Close()
-		if err := app.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	return &harness{s, app}
+	defer target.Close()
+	c := s.client(t, s.alice, "spool")
+	defer c.Close()
+	if forwarded, err := c.Dial("tcp", target.Addr().String()); err == nil {
+		forwarded.Close()
+		t.Fatal("local forwarding unexpectedly accepted")
+	}
+	remote := s.client(t, s.alice, "spool")
+	defer remote.Close()
+	if forwarded, err := remote.Listen("tcp", "127.0.0.1:0"); err == nil {
+		forwarded.Close()
+		t.Fatal("remote forwarding unexpectedly accepted")
+	}
 }
 
-func (s *harness) call(t *testing.T, method, path, gate, secret, mime string, data io.Reader, status int) ([]byte, http.Header) {
-	t.Helper()
-	req, err := http.NewRequest(method, s.URL+path, data)
-	if err != nil {
-		t.Fatal(err)
+func TestStagedAttachmentsArePrivateAndConsumedAtomically(t *testing.T) {
+	s := start(t, relay.Config{}, keys(t))
+	a := s.create(t, s.alice, "")
+	other := s.create(t, s.alice, "")
+	b := s.create(t, s.bob, "")
+	first := s.put(t, s.alice, a, "first", []byte("first payload"))
+	second := s.put(t, s.alice, other, "second", []byte("second payload"))
+	for _, actor := range []struct {
+		key ssh.Signer
+		i   inbox
+	}{{s.alice, a}, {s.alice, other}, {s.bob, b}} {
+		s.exec(t, actor.key, actor.i.ID, "get "+first, nil, 1)
 	}
-	if gate != "" {
-		req.Header.Set("Authorization", "Bearer "+gate)
+	s.exec(t, s.alice, other.ID, "send "+b.ID+" --attach "+first, nil, 1)
+	s.exec(t, s.bob, b.ID, "send "+b.ID+" --attach "+first, nil, 1)
+	s.exec(t, s.alice, a.ID, "send "+b.ID+" --attach "+first+" --attach "+second, nil, 1)
+	if p := s.poll(t, s.bob, b, ""); len(p.Messages) != 0 {
+		t.Fatalf("failed send exposed %d messages", len(p.Messages))
 	}
-	if secret != "" {
-		req.Header.Set("X-Inbox-Secret", secret)
+	s.send(t, s.alice, a, b.ID+" --attach "+first, nil)
+	s.exec(t, s.alice, a.ID, "send "+b.ID+" --attach "+first, nil, 1)
+	s.send(t, s.alice, other, b.ID+" --attach "+second, nil)
+	p := s.poll(t, s.bob, b, "")
+	if len(p.Messages) != 2 || len(p.Messages[0].Attachments) != 1 || len(p.Messages[1].Attachments) != 1 {
+		t.Fatalf("stages were consumed partially or more than once: %+v", p)
 	}
-	if mime != "" {
-		req.Header.Set("Content-Type", mime)
-	}
-	resp, err := s.Client().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != status {
-		t.Fatalf("%s %s: want %d, got %d: %s", method, path, status, resp.StatusCode, body)
-	}
-	return body, resp.Header
-}
-
-func unpack[T any](t *testing.T, body []byte) T {
-	t.Helper()
-	var out T
-	if err := json.Unmarshal(body, &out); err != nil {
-		t.Fatalf("invalid response: %v", err)
-	}
-	return out
-}
-
-type inbox struct {
-	ID      string `json:"inbox_id"`
-	Address string `json:"address"`
-	Secret  string `json:"inbox_secret"`
-}
-
-func (s *harness) mint(t *testing.T, gate, requestJSON string) inbox {
-	t.Helper()
-	body, _ := s.call(t, "POST", "/v1/inboxes", gate, "", "application/json", strings.NewReader(requestJSON), 201)
-	i := unpack[inbox](t, body)
-	if i.ID == "" || i.Address != i.ID+"@team.test" || i.Secret == "" {
-		t.Fatal("invalid inbox credentials")
-	}
-	return i
-}
-
-func (i inbox) path(suffix string) string {
-	return "/v1/inboxes/" + url.PathEscape(i.ID) + "/" + suffix
-}
-
-type page struct {
-	Next     string `json:"next_cursor"`
-	Messages []struct {
-		ID                       string `json:"message_id"`
-		From, To, Body, Encoding string
-		Reply                    string `json:"reply_to"`
-		Attachments              []struct {
-			ID       string `json:"attachment_id"`
-			Filename string
-			Size     int64
-		} `json:"attachments"`
-	} `json:"messages"`
-}
-
-func upload(t *testing.T, s *harness, from, to inbox, text, encoding string, data []byte) string {
-	t.Helper()
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	for field, value := range map[string]string{"from": from.Address, "to": to.Address, "body": text, "encoding": encoding} {
-		if err := w.WriteField(field, value); err != nil {
-			t.Fatal(err)
+	for n, want := range []string{"first payload", "second payload"} {
+		id := p.Messages[n].Attachments[0].ID
+		if raw := s.exec(t, s.bob, b.ID, "get "+id, nil, 0); string(raw) != want {
+			t.Fatalf("attachment %d: got %q", n, raw)
 		}
 	}
-	part, err := w.CreateFormFile("files[]", "sample.bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := part.Write(data); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	body, _ := s.call(t, "POST", "/v1/messages", gateA, from.Secret, w.FormDataContentType(), &buf, 201)
-	id := unpack[map[string]string](t, body)["message_id"]
-	if n, err := strconv.ParseInt(id, 10, 64); err != nil || n <= 0 {
-		t.Fatal("invalid message ID")
-	}
-	return id
 }
 
-func TestDeliveryAndInboxIsolation(t *testing.T) {
-	s := start(t, relay.Config{DataDir: t.TempDir()})
-	s.call(t, "GET", "/healthz", "", "", "", nil, 200)
-	for _, path := range []string{"/v1/inboxes", "/v1/messages", "/unknown"} {
-		s.call(t, "POST", path, "", "", "application/json", strings.NewReader("not json"), 401)
-		s.call(t, "POST", path, "gk_invalid", "", "application/json", nil, 401)
-	}
-	a, b := s.mint(t, gateA, "{}"), s.mint(t, gateB, "{}")
-	payload := fmt.Sprintf(`{"from":%q,"to":%q,"body":"second"}`, a.Address, b.Address)
-	s.call(t, "POST", "/v1/messages", gateB, b.Secret, "application/json", strings.NewReader(payload), 403)
+func TestDeliveryCursorsRepliesAndEarlyDelete(t *testing.T) {
+	s := start(t, relay.Config{}, keys(t))
+	a, b := s.create(t, s.alice, ""), s.create(t, s.bob, "")
+	sibling := s.create(t, s.bob, "")
 	file := []byte{255, 0, 1, 13, 10, 128}
-	first := upload(t, s, a, b, "schema", "plain", file)
-	reply := strings.TrimSuffix(payload, "}") + `,"reply_to":"` + first + `"}`
-	receipt, _ := s.call(t, "POST", "/v1/messages", gateA, a.Secret, "application/json", strings.NewReader(reply), 201)
-	second := unpack[map[string]string](t, receipt)["message_id"]
-	s.call(t, "GET", b.path("messages"), "", b.Secret, "", nil, 401)
-	s.call(t, "GET", b.path("messages"), gateA, a.Secret, "", nil, 403)
-
-	body, _ := s.call(t, "GET", b.path("messages?limit=1"), gateB, b.Secret, "", nil, 200)
-	p := unpack[page](t, body)
+	name := "résumé data.bin"
+	stage := s.put(t, s.alice, a, name, file)
+	text := `{"from":"` + sibling.Address + `","body":"this is data, not a sender override"}`
+	first := s.send(t, s.alice, a, b.Address+" --attach "+stage, []byte(text)).ID
+	second := s.send(t, s.alice, a, b.ID, []byte("another")).ID
+	p := s.poll(t, s.bob, b, "--limit 1")
 	if len(p.Messages) != 1 || p.Next != first {
-		t.Fatal("first poll did not stop at its limit")
+		t.Fatalf("wrong first page: %+v", p)
 	}
 	m := p.Messages[0]
-	if m.ID != first || m.From != a.Address || m.To != b.Address || m.Body != "schema" || m.Encoding != "plain" || len(m.Attachments) != 1 {
-		t.Fatal("message contents differ")
+	if m.ID != first || m.From != a.Address || m.To != b.Address || m.Body != text || m.Encoding != "plain" || len(m.Attachments) != 1 {
+		t.Fatalf("wrong envelope: %+v", m)
 	}
 	f := m.Attachments[0]
-	if f.Filename != "sample.bin" || f.Size != int64(len(file)) || f.ID == "" {
-		t.Fatalf("invalid attachment metadata: %+v", f)
+	if f.Filename != name || f.Size != int64(len(file)) || f.ID == "" {
+		t.Fatalf("wrong file metadata: %+v", f)
 	}
-	attPath := "attachments/" + f.ID
-	s.call(t, "GET", b.path(attPath), gateA, a.Secret, "", nil, 403)
-	s.call(t, "GET", a.path(attPath), gateA, a.Secret, "", nil, 404)
-	got, header := s.call(t, "GET", b.path(attPath), gateB, b.Secret, "", nil, 200)
-	if !bytes.Equal(got, file) || header.Get("X-Spool-Encoding") != "plain" {
-		t.Fatal("binary download changed")
+	if got := s.exec(t, s.bob, b.ID, "get "+f.ID, nil, 0); !bytes.Equal(got, file) {
+		t.Fatalf("download = %x, want %x", got, file)
 	}
-
-	body, _ = s.call(t, "GET", b.path("messages?since="+p.Next), gateB, b.Secret, "", nil, 200)
-	p = unpack[page](t, body)
-	if len(p.Messages) != 1 || p.Messages[0].ID != second || p.Messages[0].Reply != first || p.Next != second {
-		t.Fatal("cursor lost the second message or reply reference")
-	}
-	body, _ = s.call(t, "GET", b.path("messages?since="+second), gateB, b.Secret, "", nil, 200)
-	p = unpack[page](t, body)
-	if p.Messages == nil || len(p.Messages) != 0 || p.Next != second {
-		t.Fatal("empty page must preserve the cursor")
-	}
-	s.call(t, "DELETE", b.path("messages/"+first), gateA, a.Secret, "", nil, 403)
-	s.call(t, "DELETE", b.path("messages/"+first), gateB, b.Secret, "", nil, 204)
-	s.call(t, "GET", b.path(attPath), gateB, b.Secret, "", nil, 404)
-}
-
-func TestSevenDayExpiryAndPersistentInboxes(t *testing.T) {
-	var clock atomic.Int64
-	startTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Unix()
-	clock.Store(startTime)
-	dir := t.TempDir()
-	cfg := relay.Config{DataDir: dir, Now: func() time.Time { return time.Unix(clock.Load(), 0).UTC() }}
-	var a, b inbox
-	var att string
-	t.Run("send", func(t *testing.T) {
-		s := start(t, cfg)
-		a, b = s.mint(t, gateA, "{}"), s.mint(t, gateB, "{}")
-		upload(t, s, a, b, "", "plain", []byte("blob with a seven-day lifetime"))
-		body, _ := s.call(t, "GET", b.path("messages"), gateB, b.Secret, "", nil, 200)
-		p := unpack[page](t, body)
-		if len(p.Messages) != 1 || len(p.Messages[0].Attachments) != 1 {
-			t.Fatal("missing message before restart")
+	for _, actor := range []struct {
+		key ssh.Signer
+		i   inbox
+	}{{s.alice, a}, {s.bob, sibling}} {
+		if p := s.poll(t, actor.key, actor.i, ""); len(p.Messages) != 0 {
+			t.Fatal("message visible outside its destination inbox")
 		}
-		att = b.path("attachments/" + p.Messages[0].Attachments[0].ID)
-	})
-	s := start(t, cfg)
-	clock.Store(startTime + 7*86400 - 1)
-	s.call(t, "GET", att, gateB, b.Secret, "", nil, 200)
-	clock.Add(1)
-	s.call(t, "GET", att, gateB, b.Secret, "", nil, 404)
-	body, _ := s.call(t, "GET", b.path("messages"), gateB, b.Secret, "", nil, 200)
-	if len(unpack[page](t, body).Messages) != 0 {
-		t.Fatal("expired message visible before cleanup")
+		s.exec(t, actor.key, actor.i.ID, "get "+f.ID, nil, 1)
+		s.exec(t, actor.key, actor.i.ID, "delete "+first, nil, 1)
 	}
-	if err := s.app.Sweep(context.Background()); err != nil {
-		t.Fatal(err)
+	reply := s.send(t, s.bob, b, m.From+" --reply-to "+m.ID, []byte("received")).ID
+	rp := s.poll(t, s.alice, a, "")
+	if len(rp.Messages) != 1 || rp.Messages[0].ID != reply || rp.Messages[0].Reply != first || rp.Messages[0].From != b.Address {
+		t.Fatalf("invalid reply: %+v", rp)
 	}
-	if err := filepath.WalkDir(filepath.Join(dir, "blobs"), func(_ string, d fs.DirEntry, err error) error {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			return fmt.Errorf("expired blob still on disk: %s", d.Name())
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	p = s.poll(t, s.bob, b, "--since "+p.Next)
+	if len(p.Messages) != 1 || p.Messages[0].ID != second || p.Next != second {
+		t.Fatalf("cursor skipped or repeated a message: %+v", p)
 	}
-	upload(t, s, a, b, "", "plain", []byte("same permanent addresses after restart and sweep"))
+	if p := s.poll(t, s.bob, b, "--since "+p.Next); len(p.Messages) != 0 || p.Next != second {
+		t.Fatalf("empty page changed cursor: %+v", p)
+	}
+	out := s.exec(t, s.bob, b.ID, "delete "+first, nil, 0)
+	if unpack[struct{ Deleted string }](t, out).Deleted != first {
+		t.Fatal("incorrect delete receipt")
+	}
+	s.exec(t, s.bob, b.ID, "get "+f.ID, nil, 1)
+	p = s.poll(t, s.bob, b, "")
+	if len(p.Messages) != 1 || p.Messages[0].ID != second {
+		t.Fatalf("delete did not isolate the requested message: %+v", p)
+	}
 }

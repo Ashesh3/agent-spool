@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -10,34 +9,37 @@ import (
 	"strings"
 
 	"spool/internal/relay"
+	"spool/internal/sshserver"
 )
 
-var (
-	dnsLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	member   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-)
+var dnsLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-func parseMembers(raw string) (map[string]string, error) {
-	keys := make(map[string]string)
-	seen := make(map[string]bool)
-	for entry := range strings.SplitSeq(raw, ",") {
-		label, token, ok := strings.Cut(strings.TrimSpace(entry), ":")
-		value, prefix := strings.CutPrefix(token, "gk_")
-		_, err := hex.DecodeString(value)
-		if !ok || !member.MatchString(label) || !prefix || (len(value) != 32 && len(value) != 64) || err != nil {
-			return nil, errors.New("ALLOWED_GATE_KEYS requires label:gk_<32 or 64 hex digits> entries")
-		}
-		if _, exists := keys[label]; exists || seen[token] {
-			return nil, errors.New("ALLOWED_GATE_KEYS contains a duplicate label or token")
-		}
-		keys[label], seen[token] = token, true
+// Old mailbox secrets cannot identify an SSH owner. Only the administrator's
+// explicit, allowlisted mapping can transfer ownership of an existing inbox.
+func legacyOwners(path string, allowed map[string]bool) (map[string]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-	return keys, nil
+	owners := make(map[string]string)
+	for n, line := range strings.Split(string(b), "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		if len(f) != 2 || !dnsLabel.MatchString(f[0]) || !allowed[f[1]] || owners[f[0]] != "" {
+			return nil, fmt.Errorf("invalid ownership mapping on line %d: expected a unique inbox ID and an allowlisted SHA256 fingerprint", n+1)
+		}
+		owners[f[0]] = f[1]
+	}
+	return owners, nil
 }
 
 type settings struct {
 	relay.Config
-	listen, cert, key string
+	listen, hostKeyFile string
+	allowed             map[string]bool
 }
 
 func loadSettings() (settings, error) {
@@ -51,18 +53,28 @@ func loadSettings() (settings, error) {
 			return s, errors.New("RELAY_HOST must be a hostname, without scheme, port or path")
 		}
 	}
-	var err error
-	s.GateKeys, err = parseMembers(os.Getenv("ALLOWED_GATE_KEYS"))
+	keyFile := os.Getenv("AUTHORIZED_KEYS_FILE")
+	if keyFile == "" {
+		keyFile = "ssh-config/authorized_keys"
+	}
+	keys, err := os.ReadFile(keyFile)
 	if err != nil {
-		return s, err
+		return s, fmt.Errorf("read authorized keys: %w", err)
 	}
-	s.cert, s.key = os.Getenv("TLS_CERT_FILE"), os.Getenv("TLS_KEY_FILE")
-	if s.cert == "" || s.key == "" {
-		return s, errors.New("TLS_CERT_FILE and TLS_KEY_FILE are required; plaintext serving is disabled")
+	s.allowed, err = sshserver.ParseAuthorizedKeys(keys)
+	if err != nil {
+		return s, fmt.Errorf("authorized keys: %w", err)
 	}
+	if path := os.Getenv("LEGACY_OWNERS_FILE"); path != "" {
+		s.LegacyOwners, err = legacyOwners(path, s.allowed)
+		if err != nil {
+			return s, fmt.Errorf("legacy owners: %w", err)
+		}
+	}
+	s.hostKeyFile = os.Getenv("SSH_HOST_KEY_FILE")
 	s.listen, s.DataDir = os.Getenv("LISTEN_ADDR"), os.Getenv("DATA_DIR")
 	if s.listen == "" {
-		s.listen = "127.0.0.1:8443"
+		s.listen = "127.0.0.1:2222"
 	}
 	if s.DataDir == "" {
 		s.DataDir = "./data"

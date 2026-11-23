@@ -2,17 +2,10 @@ package relay
 
 import (
 	"context"
-	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"io"
-	"log"
-	"math"
-	"mime"
-	"mime/multipart"
-	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -23,308 +16,186 @@ const (
 	bodyLimit  = 1 << 20
 	fileCount  = 16
 	messageTTL = 7 * 24 * time.Hour
+	pendingTTL = time.Hour
 )
 
-type delivery struct {
-	To       string `json:"to"`
-	From     string `json:"from"`
-	Body     string `json:"body"`
-	Encoding string `json:"encoding"`
-	ReplyTo  string `json:"reply_to"`
+type SendOptions struct {
+	To, ReplyTo, Encoding string
+	Attachments           []string
 }
 
-type attachment struct {
-	ID   string `json:"attachment_id"`
-	Name string `json:"filename"`
-	Size int64  `json:"size"`
+type Attachment struct {
+	ID       string `json:"attachment_id"`
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
 }
 
-type upload struct {
-	delivery
-	files []attachment
-	size  int64
-	// Maximum charge this member can make, held stable against other sends
-	// until this upload commits or discards its staged bytes.
-	quota int64
+type Receipt struct {
+	ID      string    `json:"message_id"`
+	Expires time.Time `json:"expires_at"`
 }
 
-func quotaExceeded() error { return &httpError{507, "member storage quota exceeded"} }
+const quotaExceeded = RequestError("SSH key storage quota exceeded")
 
-// capacity returns the tightest applicable remaining limit and its error.
-func (r *Relay) capacity(u *upload, part int64) (int64, error) {
-	limit, reason := part, oversized("message part too large")
-	if msg := r.cfg.MaxMessageBytes - u.size; msg < limit {
-		limit, reason = msg, oversized("message exceeds total byte limit")
+// available accounts for all inboxes of this owner. Moving an attachment
+// from pending to delivered costs zero additional bytes; only the new body
+// must fit. Expired content stops counting before its scheduled sweep.
+func (r *Relay) available(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, owner string, now int64) (int64, error) {
+	var sent, pending int64
+	err := q.QueryRowContext(ctx, `SELECT
+	 (SELECT coalesce(sum(m.byte_count),0) FROM inboxes i JOIN messages m ON m.sender=i.id WHERE i.owner=? AND m.expires>?),
+	 (SELECT coalesce(sum(p.size),0) FROM inboxes i JOIN pending p ON p.inbox=i.id WHERE i.owner=? AND p.expires>?)`,
+		owner, now, owner, now).Scan(&sent, &pending)
+	if err != nil {
+		return 0, err
 	}
-	if available := u.quota - u.size; available < limit {
-		limit, reason = available, quotaExceeded()
+	if sent > r.cfg.QuotaBytes || pending > r.cfg.QuotaBytes-sent {
+		return 0, quotaExceeded
 	}
-	return limit, reason
+	return r.cfg.QuotaBytes - sent - pending, nil
 }
 
-func (r *Relay) localID(address string) (string, bool) {
-	id, host, ok := strings.Cut(address, "@")
-	return id, ok && id != "" && strings.EqualFold(host, r.cfg.Host) && validText(id, 128) && !strings.ContainsAny(id, "/\\ ")
-}
-
-func (r *Relay) send(w http.ResponseWriter, req *http.Request, m *member) error {
-	if req.Header.Get("X-Inbox-Secret") == "" {
-		return forbidden()
-	}
-	media, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
-	if err != nil || (media != "application/json" && media != "multipart/form-data") {
-		return &httpError{415, "expected application/json or multipart/form-data"}
-	}
-	ctx := req.Context()
+func (r *Relay) acquireWriter(ctx context.Context, owner string) (*member, error) {
+	r.membersMu.Lock()
+	m := r.memberLocked(owner)
+	r.membersMu.Unlock()
 	select {
 	case m.upload <- struct{}{}:
-		defer func() { <-m.upload }()
+		return m, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
-	var used int64
-	if err := r.db.QueryRowContext(ctx, "SELECT COALESCE(SUM(byte_count),0) FROM messages WHERE member=?", m.label).Scan(&used); err != nil {
-		return err
+}
+
+func (m *member) releaseWriter() { <-m.upload }
+
+func (r *Relay) Send(ctx context.Context, owner, id string, opts SendOptions, src io.Reader) (Receipt, error) {
+	if err := r.requireOwner(ctx, owner, id); err != nil {
+		return Receipt{}, err
 	}
-	u := upload{quota: r.cfg.QuotaBytes - used}
-	if u.quota < 0 {
-		return quotaExceeded()
+	to, err := r.localID(opts.To)
+	if err != nil {
+		return Receipt{}, err
 	}
-	if media == "application/json" {
-		// JSON control characters can use six wire bytes per stored byte.
-		if err := readJSON(w, req, 6*bodyLimit+8192, false, &u.delivery); err != nil {
-			return err
+	if opts.Encoding == "" {
+		opts.Encoding = "plain"
+	}
+	if opts.Encoding != "plain" && opts.Encoding != "age" {
+		return Receipt{}, RequestError("unknown message encoding")
+	}
+	if opts.ReplyTo != "" {
+		if _, ok := decimalID(opts.ReplyTo); !ok {
+			return Receipt{}, RequestError("invalid reply_to message ID")
 		}
-		limit, reason := r.capacity(&u, bodyLimit)
-		if int64(len(u.Body)) > limit {
-			return reason
+	}
+	if len(opts.Attachments) > fileCount {
+		return Receipt{}, RequestError("too many attachments")
+	}
+	for i, a := range opts.Attachments {
+		if !validID(a) {
+			return Receipt{}, RequestError("invalid attachment ID")
 		}
-		u.size = int64(len(u.Body))
-	} else {
-		defer func() {
-			for _, a := range u.files {
-				removeUnused(filepath.Join(r.staging, a.ID))
+		for _, other := range opts.Attachments[:i] {
+			if other == a {
+				return Receipt{}, RequestError("duplicate attachment ID")
 			}
-		}()
-		if err := r.multipart(w, req, &u); err != nil {
-			return err
 		}
 	}
-	if u.Encoding == "" {
-		u.Encoding = "plain"
-	}
-	switch u.Encoding {
-	case "plain":
-		if !utf8.ValidString(u.Body) {
-			return bad("plain body must be UTF-8")
-		}
-	case "age":
-		if _, err := io.Copy(io.Discard, base64.NewDecoder(base64.StdEncoding.Strict(), strings.NewReader(u.Body))); err != nil {
-			return bad("age body must be base64 encoded")
-		}
-	default:
-		return bad("unknown message encoding")
-	}
-	if u.Body == "" && len(u.files) == 0 {
-		return bad("body or attachment required")
-	}
-	if u.ReplyTo != "" {
-		if n, ok := decimalID(u.ReplyTo); !ok || n == 0 {
-			return bad("invalid reply_to message ID")
-		}
-	}
-	from, ok := r.localID(u.From)
-	if !ok {
-		return forbidden()
-	}
-	if err := r.authorize(req, from); err != nil {
-		return err
-	}
-	to, ok := r.localID(u.To)
-	if !ok {
-		return bad("expected a local recipient address")
-	}
-	var exists bool
-	if err := r.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM inboxes WHERE id=?)", to).Scan(&exists); err != nil {
-		return err
-	}
-	if !exists {
-		return missing("recipient inbox not found")
-	}
-	id, expires, err := r.deliver(ctx, m, &u, from, to)
-	if err != nil {
-		return err
-	}
-	writeJSON(w, 201, struct {
-		ID      string    `json:"message_id"`
-		Expires time.Time `json:"expires_at"`
-	}{strconv.FormatInt(id, 10), expires})
-	return nil
-}
-
-func removeUnused(path string) {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Printf("spool relay: removing unused file: %v", err)
-	}
-}
-
-func (r *Relay) multipart(w http.ResponseWriter, req *http.Request, u *upload) error {
-	wireMax := min(r.cfg.MaxMessageBytes, int64(math.MaxInt64)-(1<<20)) + (1 << 20)
-	if req.ContentLength > wireMax {
-		return oversized("multipart request too large")
-	}
-	req.Body = http.MaxBytesReader(w, req.Body, wireMax)
-	reader, err := req.MultipartReader()
-	if err != nil {
-		return bad("invalid multipart content type")
-	}
-	seen := make(map[string]bool)
-	for {
-		part, err := reader.NextRawPart()
-		if err == io.EOF {
-			return nil
-		}
+	// No database connection or per-owner writer is held over SSH stdin.
+	var body strings.Builder
+	if src != nil {
+		limit := min(int64(bodyLimit), r.cfg.MaxMessageBytes)
+		n, err := io.Copy(&body, io.LimitReader(src, limit+1))
 		if err != nil {
-			if errors.Is(err, multipart.ErrMessageTooLarge) {
-				return oversized("multipart headers too large")
-			}
-			return inputError(err)
+			return Receipt{}, err
 		}
-		// Parse the original filename, not Part.FileName(), which applies
-		// platform-specific filepath.Base and obscures path separators.
-		disposition, fields, err := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
-		if err != nil || disposition != "form-data" {
-			return bad("invalid multipart disposition")
-		}
-		name := fields["name"]
-		filename, isFile := fields["filename"]
-		if name == "files[]" {
-			if !isFile || filename == "" || filename == "." || filename == ".." || !validText(filename, 255) || strings.ContainsAny(filename, "/\\") {
-				return bad("expected a safe attachment basename")
-			}
-			if len(u.files) == fileCount {
-				return oversized("too many attachments")
-			}
-			if err := r.stage(part, u, filename); err != nil {
-				return err
-			}
-			continue
-		}
-		if isFile || seen[name] {
-			return bad("unexpected or duplicate multipart field")
-		}
-		seen[name] = true
-		var dst *string
-		limit, reason := int64(512), oversized("multipart field too large")
-		switch name {
-		case "from":
-			dst = &u.From
-		case "to":
-			dst = &u.To
-		case "reply_to":
-			dst = &u.ReplyTo
-		case "encoding":
-			dst = &u.Encoding
-		case "body":
-			dst = &u.Body
-			limit, reason = r.capacity(u, bodyLimit)
-		default:
-			return bad("unknown multipart field")
-		}
-		data, err := io.ReadAll(io.LimitReader(part, limit+1))
-		if err != nil {
-			return inputError(err)
-		}
-		if int64(len(data)) > limit {
-			return reason
-		}
-		*dst = string(data)
-		if name == "body" {
-			u.size += int64(len(data))
+		if n > limit {
+			return Receipt{}, RequestError("message body exceeds byte limit")
 		}
 	}
-}
-
-func (r *Relay) stage(part *multipart.Part, u *upload, name string) error {
-	id := "a_" + rand.Text()
-	f, err := os.OpenFile(filepath.Join(r.staging, id), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	text := body.String()
+	if text == "" && len(opts.Attachments) == 0 {
+		return Receipt{}, RequestError("body or attachment required")
+	}
+	if opts.Encoding == "plain" && !utf8.ValidString(text) {
+		return Receipt{}, RequestError("plain body must be UTF-8")
+	}
+	if opts.Encoding == "age" {
+		// Do not accept padded base64 followed by a second stream, even if
+		// their boundary happens to coincide with a decoder read boundary.
+		if i := strings.IndexByte(text, '='); i != -1 && strings.Trim(text[i:], "=\r\n") != "" {
+			return Receipt{}, RequestError("age body must be standard base64")
+		}
+		if _, err := io.Copy(io.Discard, base64.NewDecoder(base64.StdEncoding.Strict(), strings.NewReader(text))); err != nil {
+			return Receipt{}, RequestError("age body must be standard base64")
+		}
+	}
+	m, err := r.acquireWriter(ctx, owner)
 	if err != nil {
-		return err
+		return Receipt{}, err
 	}
-	a := attachment{ID: id, Name: name}
-	u.files = append(u.files, a) // Schedule cleanup even when copy or close fails.
-	limit, reason := r.capacity(u, r.cfg.MaxFileBytes)
-	n, err := io.Copy(f, io.LimitReader(part, limit))
-	if err == nil && n == limit {
-		var one [1]byte
-		if extra, probeErr := io.ReadFull(part, one[:]); extra != 0 {
-			err = reason
-		} else if !errors.Is(probeErr, io.EOF) {
-			err = probeErr
-		}
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err != nil {
-		var osErr *os.PathError
-		var limitErr *httpError
-		if errors.As(err, &osErr) || errors.As(err, &limitErr) {
-			return err
-		}
-		return inputError(err)
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	u.files[len(u.files)-1].Size = n
-	u.size += n
-	return nil
-}
-
-func (r *Relay) deliver(ctx context.Context, m *member, u *upload, from, to string) (int64, time.Time, error) {
-	r.files.Lock()
-	defer r.files.Unlock()
-	now := r.cfg.Now().UTC()
-	expires := now.Add(messageTTL)
+	defer m.releaseWriter()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, expires, err
+		return Receipt{}, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `INSERT INTO messages(sender,recipient,body,encoding,reply_to,created,expires,member,byte_count) VALUES(?,?,?,?,?,?,?,?,?)`, from, to, u.Body, u.Encoding, u.ReplyTo, now.UnixNano(), expires.UnixNano(), m.label, u.size)
-	if err != nil {
-		return 0, expires, err
+	now := r.cfg.Now().UTC()
+	expires := now.Add(messageTTL)
+	var exists bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM inboxes WHERE id=?)", to).Scan(&exists); err != nil {
+		return Receipt{}, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, expires, err
+	if !exists {
+		return Receipt{}, RequestError("recipient inbox not found")
 	}
-	promoted := 0
-	defer func() {
-		for _, a := range u.files[:promoted] {
-			removeUnused(filepath.Join(r.blobs, a.ID))
+	available, err := r.available(ctx, tx, owner, now.UnixNano())
+	if err != nil {
+		return Receipt{}, err
+	}
+	size := int64(len(text))
+	if size > available {
+		return Receipt{}, quotaExceeded
+	}
+	// Insert with the body charge, then add each file's charge in the same
+	// transaction. A missing, expired or already-used ID rolls back the lot.
+	res, err := tx.ExecContext(ctx, `INSERT INTO messages(sender,recipient,body,encoding,reply_to,created,expires,byte_count)
+		VALUES(?,?,?,?,?,?,?,?)`, id, to, text, opts.Encoding, opts.ReplyTo, now.UnixNano(), expires.UnixNano(), size)
+	if err != nil {
+		return Receipt{}, err
+	}
+	messageID, err := res.LastInsertId()
+	if err != nil {
+		return Receipt{}, err
+	}
+	for _, a := range opts.Attachments {
+		var added int64
+		err := tx.QueryRowContext(ctx, `INSERT INTO attachments(id,message_id,filename,size)
+			SELECT id,?,filename,size FROM pending WHERE id=? AND inbox=? AND expires>? RETURNING size`,
+			messageID, a, id, now.UnixNano()).Scan(&added)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Receipt{}, RequestError("staged attachment unavailable for this inbox")
 		}
-	}()
-	for _, a := range u.files {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO attachments(id,message_id,filename,size) VALUES(?,?,?,?)`, a.ID, id, a.Name, a.Size); err != nil {
-			return 0, expires, err
+		if err != nil {
+			return Receipt{}, err
 		}
-		dest := filepath.Join(r.blobs, a.ID)
-		if _, err := os.Lstat(dest); err == nil {
-			return 0, expires, errors.New("attachment ID collision")
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return 0, expires, err
+		if added > r.cfg.MaxMessageBytes-size {
+			return Receipt{}, RequestError("message exceeds total byte limit")
 		}
-		if err := os.Rename(filepath.Join(r.staging, a.ID), dest); err != nil {
-			return 0, expires, err
+		size += added
+		if _, err := tx.ExecContext(ctx, "DELETE FROM pending WHERE id=?", a); err != nil {
+			return Receipt{}, err
 		}
-		promoted++
+	}
+	if len(opts.Attachments) > 0 {
+		if _, err := tx.ExecContext(ctx, "UPDATE messages SET byte_count=? WHERE id=?", size, messageID); err != nil {
+			return Receipt{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, expires, err
+		return Receipt{}, err
 	}
-	promoted = 0
-	return id, expires, nil
+	return Receipt{strconv.FormatInt(messageID, 10), expires}, nil
 }

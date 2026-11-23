@@ -4,5 +4,6 @@
 !/.env.example
 /certs/
 /data/
+/ssh-config/
 /.agent-mailbox.json
 *.exe

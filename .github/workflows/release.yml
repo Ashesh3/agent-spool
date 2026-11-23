@@ -25,8 +25,8 @@ jobs:
               GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/spool-relay-$os-$arch$ext" ./cmd/spool-relay
             done
           done
-          cp AGENT_API.md dist/
-          (cd dist && sha256sum spool-relay-* AGENT_API.md > SHA256SUMS)
+          cp AGENT_SSH.md dist/
+          (cd dist && sha256sum spool-relay-* AGENT_SSH.md > SHA256SUMS)
       - name: Publish relay binaries, agent guide and checksums
         env:
           GH_TOKEN: ${{ github.token }}
