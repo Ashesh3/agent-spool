@@ -1,4 +1,4 @@
-// Command spool-relay serves one private spool address domain.
+// Command spool-relay serves a spool mailbox domain over SSH.
 package main
 
 import (

@@ -10,6 +10,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags=
 RUN mkdir /data && chown 65532:65532 /data && chmod 700 /data
 
 FROM scratch
+COPY LICENSE THIRD_PARTY_NOTICES.txt /
 COPY --from=build /relay /spool-relay
 COPY --from=build --chown=65532:65532 /data /data
 USER 65532:65532

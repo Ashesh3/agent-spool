@@ -1,9 +1,30 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Build and test output
 /dist/
-/.env
-/.env.*
-!/.env.example
-/certs/
-/data/
-/ssh-config/
-/.agent-mailbox.json
+/spool-relay
 *.exe
+*.test
+/coverage.out
+
+# Local configuration, credentials and mailbox data
+.env
+.env.*
+!/.env.example
+/ssh-config/
+/data/
+/certs/
+/.agent-mailbox.json
+authorized_keys
+known_hosts
+ssh_host_*_key
+id_ed25519
+id_ecdsa
+id_rsa
+*.pem
+*.key
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

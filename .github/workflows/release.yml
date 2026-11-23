@@ -3,30 +3,43 @@ on:
   push:
     tags: ['v*']
 permissions:
-  contents: write
+  contents: read
 jobs:
-  release:
+  test:
+    if: ${{ !github.event.deleted }}
+    uses: ./.github/workflows/test.yml
+
+  package:
+    needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
           go-version: '1.27.4'
-      - name: Test and cross-compile the relay
-        env:
-          CGO_ENABLED: '0'
-        run: |
-          set -eu
-          go test ./...
-          mkdir dist
-          for os in darwin linux windows; do
-            ext=''; if [ "$os" = windows ]; then ext='.exe'; fi
-            for arch in amd64 arm64; do
-              GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "dist/spool-relay-$os-$arch$ext" ./cmd/spool-relay
-            done
-          done
-          (cd dist && sha256sum spool-relay-* > SHA256SUMS)
-      - name: Publish relay binaries and checksums
+          cache: false
+      - name: Package relay for macOS, Linux and Windows
+        run: sh scripts/package-release.sh "$RUNNER_TEMP/release-assets"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-assets
+          path: dist
+      - name: Publish archives and checksums
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/*
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes dist/*.tar.gz dist/*.zip dist/SHA256SUMS

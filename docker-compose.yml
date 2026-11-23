@@ -5,7 +5,7 @@ services:
     ports:
       - "${BIND_IP:-127.0.0.1}:${RELAY_PORT:-2222}:2222"
     environment:
-      RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST to the private relay hostname}
+      RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST to the relay address domain}
       SSH_HOST_KEY_FILE: ${SSH_HOST_KEY_FILE:-}
       LEGACY_OWNERS_FILE: ${LEGACY_OWNERS_FILE:-}
       MAX_FILE_BYTES: ${MAX_FILE_BYTES:-26214400}
