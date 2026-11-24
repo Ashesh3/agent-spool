@@ -3,8 +3,10 @@ package integration_test
 import (
 	"bytes"
 	"net"
+	"strings"
 	"testing"
 
+	"filippo.io/age"
 	"golang.org/x/crypto/ssh"
 	"spool/internal/relay"
 )
@@ -38,6 +40,37 @@ func TestPublicKeyLoginAndOwnedInboxes(t *testing.T) {
 	s.exec(t, s.alice, a.ID, "send "+b.ID+" --from "+b.Address, []byte("forged"), 2)
 	if p := s.poll(t, s.bob, b, ""); len(p.Messages) != 0 {
 		t.Fatal("rejected send published a message")
+	}
+}
+
+func TestNamedInboxIsTheSSHLoginAndRoutingAddress(t *testing.T) {
+	s := start(t, relay.Config{}, keys(t))
+	blob := unpack[inbox](t, s.exec(t, s.alice, "spool", "create blob", nil, 0))
+	if blob != (inbox{ID: "blob", Address: "blob@" + testHost}) {
+		t.Fatalf("requested blob, got %+v", blob)
+	}
+	s.exec(t, s.bob, "spool", "create blob", nil, 1)
+	s.exec(t, s.alice, "spool", "create blob", nil, 1)
+	s.denyLogin(t, "blob", ssh.PublicKeys(s.bob))
+	s.requireList(t, s.bob)
+	for _, name := range []string{"spool", "SPOOL", "blob@elsewhere", "../blob", strings.Repeat("x", 129)} {
+		s.exec(t, s.alice, "spool", "create "+name, nil, 1)
+	}
+	s.requireList(t, s.alice, blob)
+
+	key, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := key.Recipient().String()
+	sender := unpack[inbox](t, s.exec(t, s.bob, "spool", "create Build_bot-2 --public-key "+pub, nil, 0))
+	if sender.ID != "Build_bot-2" || unpack[map[string]string](t, s.exec(t, s.alice, "spool", "pubkey "+sender.Address, nil, 0))["public_key"] != pub {
+		t.Fatal("named creation did not preserve the handle and registered key")
+	}
+	s.send(t, s.bob, sender, blob.Address, []byte("hello blob"))
+	page := s.poll(t, s.alice, blob, "")
+	if len(page.Messages) != 1 || page.Messages[0].From != "Build_bot-2@"+testHost || page.Messages[0].To != blob.Address || page.Messages[0].Body != "hello blob" {
+		t.Fatalf("named inbox received the wrong delivery: %+v", page)
 	}
 }
 

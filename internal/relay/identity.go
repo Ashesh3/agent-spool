@@ -22,6 +22,9 @@ func (e RequestError) Error() string { return string(e) }
 
 const notOwner = RequestError("inbox unavailable for this SSH key")
 
+// ManagementUser is the SSH login for relay-wide commands, never an inbox.
+const ManagementUser = "spool"
+
 type Inbox struct {
 	ID      string `json:"inbox_id"`
 	Address string `json:"address"`
@@ -121,9 +124,15 @@ func newHandle() string {
 	return adjectives[b[0]%8] + "-" + animals[b[1]%8] + "-" + hex.EncodeToString(b[2:])
 }
 
-func (r *Relay) Create(ctx context.Context, owner, publicKey string) (Inbox, error) {
+func (r *Relay) Create(ctx context.Context, owner, name, publicKey string) (Inbox, error) {
 	if !validOwner(owner) {
 		return Inbox{}, notOwner
+	}
+	if name != "" && !validID(name) {
+		return Inbox{}, RequestError("inbox name must be 1–128 ASCII letters, digits, hyphens or underscores, starting with a letter or digit")
+	}
+	if strings.EqualFold(name, ManagementUser) {
+		return Inbox{}, RequestError("spool is reserved for relay commands")
 	}
 	if publicKey != "" {
 		if len(publicKey) != 62 {
@@ -135,7 +144,10 @@ func (r *Relay) Create(ctx context.Context, owner, publicKey string) (Inbox, err
 		}
 	}
 	for {
-		id := newHandle()
+		id := name
+		if id == "" {
+			id = newHandle()
+		}
 		res, err := r.db.ExecContext(ctx, `INSERT INTO inboxes(id,owner,public_key) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`, id, owner, publicKey)
 		if err != nil {
 			return Inbox{}, err
@@ -146,6 +158,9 @@ func (r *Relay) Create(ctx context.Context, owner, publicKey string) (Inbox, err
 		}
 		if n != 0 {
 			return Inbox{id, id + "@" + r.cfg.Host}, nil
+		}
+		if name != "" {
+			return Inbox{}, RequestError("inbox name already taken")
 		}
 	}
 }

@@ -8,7 +8,7 @@ Native processes read environment variables. Docker Compose reads `.env` next to
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `RELAY_HOST` | Required | Address domain, e.g. `relay.example.org`. No scheme, port, or path. |
+| `RELAY_HOST` | Required | DNS name given to agents, e.g. `relay.example.org`. No IP literal, scheme, port, or path. |
 | `LISTEN_ADDR` | `127.0.0.1:2222` natively | Native TCP listener. The container listens on `:2222`. |
 | `DATA_DIR` | `./data` natively; `/data` in Docker | Database, blobs, and default host key. Use an absolute native path under a service manager. |
 | `AUTHORIZED_KEYS_FILE` | `ssh-config/authorized_keys` natively; `/config/authorized_keys` in Docker | Plain OpenSSH public keys, one per line. Blank lines and comments are allowed; key options and certificates are not. |
@@ -22,6 +22,8 @@ Native processes read environment variables. Docker Compose reads `.env` next to
 The body limit is 1 MiB, including base64 when using age; at most 16 attachments can accompany a message. Limit overrides use positive integers. Pending uploads expire after one hour; delivered mail expires seven days after sending. Expired data is inaccessible before the startup or five-minute cleanup sweep removes it. These limits do not delete local downloads or backups.
 
 Compose publishes `${BIND_IP:-127.0.0.1}:${RELAY_PORT:-2222}` and mounts `${SSH_CONFIG_DIR:-./ssh-config}` read-only at `/config`. Create that directory before startup. To allow remote agents, select the intended host interface, configure routing and firewall rules, and give clients the matching SSH endpoint. `RELAY_HOST` alone does not expose the listener.
+
+If an existing deployment advertised an IP, change `RELAY_HOST` in `.env` to the public DNS name and run `docker compose up -d --build --force-recreate relay`. Keep `relay-data`: handles, owners, messages and cursors are unchanged. `list`, `create` and `poll` use the new suffix; share the corrected addresses because the old suffix will no longer route. Re-fetch `skill` to update previously installed agent instructions.
 
 ## Identities and backups
 

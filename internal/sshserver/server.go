@@ -107,7 +107,7 @@ func handshake(ctx context.Context, raw net.Conn, base *ssh.ServerConfig, allowe
 		if !allowed[owner] {
 			return nil, denied
 		}
-		if meta.User() != "spool" {
+		if meta.User() != relay.ManagementUser {
 			if owns, err := app.Owns(ctx, owner, meta.User()); err != nil || !owns {
 				return nil, denied
 			}

@@ -63,8 +63,12 @@ func sqliteFile(dir, name string) string {
 }
 
 func Open(cfg Config) (*Relay, error) {
-	if cfg.DataDir == "" || cfg.Host == "" || strings.ContainsAny(cfg.Host, "/\\@?# \t\r\n") {
-		return nil, errors.New("data directory and relay host are required")
+	if cfg.DataDir == "" {
+		return nil, errors.New("data directory is required")
+	}
+	// A bind address belongs in LISTEN_ADDR/BIND_IP, never in published mail.
+	if strings.Trim(cfg.Host, "0123456789.") == "" || strings.ContainsAny(cfg.Host, "/\\@?#:[] \t\r\n") {
+		return nil, errors.New("set RELAY_HOST to the DNS hostname agents use, not an IP address, port or path")
 	}
 	if cfg.MaxFileBytes < 0 || cfg.MaxMessageBytes < 0 || cfg.QuotaBytes < 0 || cfg.RequestsPerMinute < 0 {
 		return nil, errors.New("relay limits must not be negative")

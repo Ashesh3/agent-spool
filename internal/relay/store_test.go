@@ -28,9 +28,22 @@ func testRelay(t *testing.T, quota int64) *Relay {
 	return r
 }
 
+func TestRejectIPAddressAsMailboxDomain(t *testing.T) {
+	for _, host := range []string{"192.0.2.10", "2001:db8::10", "[2001:db8::10]", "192.0.2.10:2222"} {
+		r, err := Open(Config{DataDir: t.TempDir(), Host: host})
+		if err == nil {
+			r.Close()
+			t.Fatalf("accepted literal IP as mailbox suffix: %s", host)
+		}
+		if strings.Contains(err.Error(), host) {
+			t.Fatal("domain configuration error disclosed the rejected address")
+		}
+	}
+}
+
 func testInbox(t *testing.T, r *Relay, owner string) Inbox {
 	t.Helper()
-	box, err := r.Create(t.Context(), owner, "")
+	box, err := r.Create(t.Context(), owner, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

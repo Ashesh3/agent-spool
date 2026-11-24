@@ -32,14 +32,14 @@ func (s *session) run(ctx context.Context, line string) error {
 	if i := strings.IndexAny(line, " \t"); i >= 0 {
 		verb, rest = line[:i], line[i+1:]
 	}
-	if s.user != "spool" && verb == "put" {
+	if s.user != relay.ManagementUser && verb == "put" {
 		if len(rest) == 0 {
 			return usageError("usage: put <basename>")
 		}
 		return s.result(s.app.Put(ctx, s.owner, s.user, rest, s.ch))
 	}
 	args := strings.FieldsFunc(rest, func(r rune) bool { return r == ' ' || r == '\t' })
-	if s.user == "spool" {
+	if s.user == relay.ManagementUser {
 		return s.manage(ctx, verb, args)
 	}
 	switch verb {
@@ -82,15 +82,17 @@ func (s *session) manage(ctx context.Context, verb string, args []string) error 
 		_, err := s.ch.Write(skillMarkdown)
 		return err
 	case "create":
-		var key string
-		switch {
-		case len(args) == 0:
-		case len(args) == 2 && args[0] == "--public-key" && operand(args[1]):
-			key = args[1]
-		default:
-			return usageError("usage: create [--public-key <age recipient>]")
+		var name, key string
+		if len(args) > 0 && operand(args[0]) {
+			name, args = args[0], args[1:]
 		}
-		return s.result(s.app.Create(ctx, s.owner, key))
+		if len(args) != 0 {
+			if len(args) != 2 || args[0] != "--public-key" || !operand(args[1]) {
+				return usageError("usage: create [name] [--public-key <age recipient>]")
+			}
+			key = args[1]
+		}
+		return s.result(s.app.Create(ctx, s.owner, name, key))
 	case "list":
 		if len(args) != 0 {
 			return usageError("usage: list")
