@@ -21,6 +21,7 @@ const (
 	handshakeTime  = 15 * time.Second
 	connectionTime = 10 * time.Minute
 	ownerExtension = "spool-owner"
+	inboxExtension = "spool-inbox-key"
 )
 
 // closeOnDone interrupts even a connection blocked in a pre-authentication
@@ -107,14 +108,17 @@ func handshake(ctx context.Context, raw net.Conn, base *ssh.ServerConfig, allowe
 		if !allowed[owner] {
 			return nil, denied
 		}
+		var inbox relay.InboxKey
 		if meta.User() != relay.ManagementUser {
-			if owns, err := app.Owns(ctx, owner, meta.User()); err != nil || !owns {
+			var err error
+			inbox, err = app.ResolveInbox(ctx, owner, meta.User())
+			if err != nil {
 				return nil, denied
 			}
 		}
 		// This callback may be an unsigned probe. Do not charge or otherwise
 		// mutate state. NewServerConn returns only the verified key's permissions.
-		return &ssh.Permissions{Extensions: map[string]string{ownerExtension: owner}}, nil
+		return &ssh.Permissions{Extensions: map[string]string{ownerExtension: owner, inboxExtension: string(inbox)}}, nil
 	}
 	return ssh.NewServerConn(raw, &cfg)
 }
@@ -134,6 +138,10 @@ func serveConnection(ctx context.Context, raw net.Conn, base *ssh.ServerConfig, 
 		return
 	}
 	owner := conn.Permissions.Extensions[ownerExtension]
+	inbox := relay.InboxKey(conn.Permissions.Extensions[inboxExtension])
+	if conn.User() != relay.ManagementUser && inbox == "" {
+		return
+	}
 	var workers sync.WaitGroup
 	workers.Go(func() { ssh.DiscardRequests(globals) })
 	slots := make(chan struct{}, maxSessions)
@@ -153,7 +161,7 @@ func serveConnection(ctx context.Context, raw net.Conn, base *ssh.ServerConfig, 
 			<-slots
 			continue
 		}
-		s := session{app: app, owner: owner, user: conn.User(), ch: ch}
+		s := session{app: app, owner: owner, inbox: inbox, ch: ch}
 		workers.Go(func() {
 			defer func() { <-slots }()
 			s.serve(ctx, reqs)

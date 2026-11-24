@@ -37,12 +37,10 @@ type Receipt struct {
 
 const quotaExceeded = RequestError("SSH key storage quota exceeded")
 
-// available accounts for all inboxes of this owner. Moving an attachment
-// from pending to delivered costs zero additional bytes; only the new body
-// must fit. Expired content stops counting before its scheduled sweep.
-func (r *Relay) available(ctx context.Context, q interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, owner string, now int64) (int64, error) {
+// Retired sending inboxes still charge their original owner for live mail.
+// Moving an attachment from pending to delivered costs zero additional bytes;
+// only the new body must fit. Expired content stops counting before its sweep.
+func (r *Relay) available(ctx context.Context, q rowQuerier, owner string, now int64) (int64, error) {
 	var sent, pending int64
 	err := q.QueryRowContext(ctx, `SELECT
 	 (SELECT coalesce(sum(m.byte_count),0) FROM inboxes i JOIN messages m ON m.sender=i.id WHERE i.owner=? AND m.expires>?),
@@ -71,11 +69,11 @@ func (r *Relay) acquireWriter(ctx context.Context, owner string) (*member, error
 
 func (m *member) releaseWriter() { <-m.upload }
 
-func (r *Relay) Send(ctx context.Context, owner, id string, opts SendOptions, src io.Reader) (Receipt, error) {
-	if err := r.requireOwner(ctx, owner, id); err != nil {
+func (r *Relay) Send(ctx context.Context, owner string, id InboxKey, opts SendOptions, src io.Reader) (Receipt, error) {
+	if _, err := ownedHandle(ctx, r.db, owner, id); err != nil {
 		return Receipt{}, err
 	}
-	to, err := r.localID(opts.To)
+	handle, err := r.localID(opts.To)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -85,8 +83,10 @@ func (r *Relay) Send(ctx context.Context, owner, id string, opts SendOptions, sr
 	if opts.Encoding != "plain" && opts.Encoding != "age" {
 		return Receipt{}, RequestError("unknown message encoding")
 	}
+	var replyID int64
 	if opts.ReplyTo != "" {
-		if _, ok := decimalID(opts.ReplyTo); !ok {
+		var ok bool
+		if replyID, ok = decimalID(opts.ReplyTo); !ok {
 			return Receipt{}, RequestError("invalid reply_to message ID")
 		}
 	}
@@ -102,6 +102,12 @@ func (r *Relay) Send(ctx context.Context, owner, id string, opts SendOptions, sr
 				return Receipt{}, RequestError("duplicate attachment ID")
 			}
 		}
+	}
+	// Pin the addressee before waiting on stdin: a recycled handle names a
+	// different inbox even if both generations have the same owner.
+	to, err := activeKey(ctx, r.db, handle)
+	if err != nil {
+		return Receipt{}, err
 	}
 	// No database connection or per-owner writer is held over SSH stdin.
 	var body strings.Builder
@@ -144,12 +150,27 @@ func (r *Relay) Send(ctx context.Context, owner, id string, opts SendOptions, sr
 	defer tx.Rollback()
 	now := r.cfg.Now().UTC()
 	expires := now.Add(messageTTL)
-	var exists bool
-	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM inboxes WHERE id=?)", to).Scan(&exists); err != nil {
+	if _, err := ownedHandle(ctx, tx, owner, id); err != nil {
 		return Receipt{}, err
 	}
-	if !exists {
+	current, err := activeKey(ctx, tx, handle)
+	if err != nil {
+		return Receipt{}, err
+	}
+	if current != to {
 		return Receipt{}, RequestError("recipient inbox not found")
+	}
+	if replyID != 0 {
+		var valid bool
+		err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM messages WHERE id=? AND recipient=? AND sender=? AND expires>?
+		)`, replyID, id, to, now.UnixNano()).Scan(&valid)
+		if err != nil {
+			return Receipt{}, err
+		}
+		if !valid {
+			return Receipt{}, RequestError("reply_to message unavailable for this recipient")
+		}
 	}
 	available, err := r.available(ctx, tx, owner, now.UnixNano())
 	if err != nil {

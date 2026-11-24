@@ -25,13 +25,14 @@ type messageView struct {
 	Attachments json.RawMessage `json:"attachments"`
 }
 
-const messageQuery = `SELECT m.sender, m.body, m.encoding, m.reply_to, m.created, m.expires,
+const messageQuery = `SELECT sender.handle, m.body, m.encoding, m.reply_to, m.created, m.expires,
  (SELECT json_group_array(json_object('attachment_id',a.id,'filename',a.filename,'size',a.size) ORDER BY a.rowid)
   FROM attachments a WHERE a.message_id=m.id)
- FROM messages m WHERE m.id=? AND m.recipient=? AND m.expires>?`
+ FROM messages m JOIN inboxes sender ON sender.id=m.sender WHERE m.id=? AND m.recipient=? AND m.expires>?`
 
-func (r *Relay) Poll(ctx context.Context, owner, id string, since int64, limit int, out io.Writer) error {
-	if err := r.requireOwner(ctx, owner, id); err != nil {
+func (r *Relay) Poll(ctx context.Context, owner string, id InboxKey, since int64, limit int, out io.Writer) error {
+	handle, err := ownedHandle(ctx, r.db, owner, id)
+	if err != nil {
 		return err
 	}
 	if since < 0 || limit < 1 || limit > 100 {
@@ -69,7 +70,7 @@ func (r *Relay) Poll(ctx context.Context, owner, id string, since int64, limit i
 	enc := json.NewEncoder(out)
 	enc.SetEscapeHTML(false)
 	cursor := since
-	address := id + "@" + r.cfg.Host
+	address := handle + "@" + r.cfg.Host
 	for _, n := range ids {
 		var m messageView
 		var created, expires int64
@@ -101,7 +102,7 @@ func (r *Relay) Poll(ctx context.Context, owner, id string, since int64, limit i
 	return err
 }
 
-func (r *Relay) openAttachment(ctx context.Context, inbox, id string) (*os.File, int64, error) {
+func (r *Relay) openAttachment(ctx context.Context, inbox InboxKey, id string) (*os.File, int64, error) {
 	r.files.Lock()
 	defer r.files.Unlock()
 	var size int64
@@ -117,8 +118,8 @@ func (r *Relay) openAttachment(ctx context.Context, inbox, id string) (*os.File,
 	return f, size, err
 }
 
-func (r *Relay) Get(ctx context.Context, owner, id, attachmentID string, out io.Writer) error {
-	if err := r.requireOwner(ctx, owner, id); err != nil {
+func (r *Relay) Get(ctx context.Context, owner string, id InboxKey, attachmentID string, out io.Writer) error {
+	if _, err := ownedHandle(ctx, r.db, owner, id); err != nil {
 		return err
 	}
 	if !validID(attachmentID) {
@@ -139,8 +140,8 @@ func (r *Relay) Get(ctx context.Context, owner, id, attachmentID string, out io.
 	return err
 }
 
-func (r *Relay) Delete(ctx context.Context, owner, id, msgID string) error {
-	if err := r.requireOwner(ctx, owner, id); err != nil {
+func (r *Relay) Delete(ctx context.Context, owner string, id InboxKey, msgID string) error {
+	if _, err := ownedHandle(ctx, r.db, owner, id); err != nil {
 		return err
 	}
 	n, ok := decimalID(msgID)

@@ -201,13 +201,21 @@ type page struct {
 
 func (s *harness) create(t *testing.T, owner ssh.Signer, publicKey string) inbox {
 	t.Helper()
+	return s.createNamed(t, owner, "", publicKey)
+}
+
+func (s *harness) createNamed(t *testing.T, owner ssh.Signer, name, publicKey string) inbox {
+	t.Helper()
 	cmd := "create"
+	if name != "" {
+		cmd += " " + name
+	}
 	if publicKey != "" {
 		cmd += " --public-key " + publicKey
 	}
 	out := s.exec(t, owner, "spool", cmd, nil, 0)
 	i := unpack[inbox](t, out)
-	if i.ID == "" || i.Address != i.ID+"@"+testHost || unpack[map[string]json.RawMessage](t, out)["inbox_secret"] != nil {
+	if i.ID == "" || name != "" && i.ID != name || i.Address != i.ID+"@"+testHost || unpack[map[string]json.RawMessage](t, out)["inbox_secret"] != nil {
 		t.Fatal("invalid inbox identity or unexpected legacy credential")
 	}
 	return i

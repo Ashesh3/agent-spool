@@ -30,6 +30,14 @@ type Inbox struct {
 	Address string `json:"address"`
 }
 
+// InboxKey identifies one incarnation, not its reusable public handle.
+// Mailbox commands use the key resolved when the SSH connection authenticated.
+type InboxKey string
+
+type rowQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func validOwner(owner string) bool {
 	s, ok := strings.CutPrefix(owner, "SHA256:")
 	if !ok || len(s) != base64.RawStdEncoding.EncodedLen(sha256.Size) {
@@ -96,24 +104,41 @@ func (r *Relay) Allow(owner string) bool {
 	return true
 }
 
-func (r *Relay) Owns(ctx context.Context, owner, id string) (bool, error) {
-	if !validOwner(owner) || !validID(id) {
-		return false, nil
-	}
-	var ok bool
-	err := r.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM inboxes WHERE owner=? AND id=?)", owner, id).Scan(&ok)
-	return ok, err
+func (r *Relay) ResolveInbox(ctx context.Context, owner, handle string) (InboxKey, error) {
+	return resolveOwnedKey(ctx, r.db, owner, handle)
 }
 
-func (r *Relay) requireOwner(ctx context.Context, owner, id string) error {
-	ok, err := r.Owns(ctx, owner, id)
-	if err != nil {
-		return err
+func resolveOwnedKey(ctx context.Context, q rowQuerier, owner, handle string) (InboxKey, error) {
+	if !validOwner(owner) || !validID(handle) {
+		return "", notOwner
 	}
-	if !ok {
-		return notOwner
+	var key InboxKey
+	err := q.QueryRowContext(ctx, "SELECT id FROM inboxes WHERE handle=? AND owner=? AND retired=0", handle, owner).Scan(&key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", notOwner
 	}
-	return nil
+	return key, err
+}
+
+func activeKey(ctx context.Context, q rowQuerier, handle string) (InboxKey, error) {
+	var key InboxKey
+	err := q.QueryRowContext(ctx, "SELECT id FROM inboxes WHERE handle=? AND retired=0", handle).Scan(&key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", RequestError("recipient inbox not found")
+	}
+	return key, err
+}
+
+func ownedHandle(ctx context.Context, q rowQuerier, owner string, key InboxKey) (string, error) {
+	if !validOwner(owner) || key == "" {
+		return "", notOwner
+	}
+	var handle string
+	err := q.QueryRowContext(ctx, "SELECT handle FROM inboxes WHERE id=? AND owner=? AND retired=0", key, owner).Scan(&handle)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", notOwner
+	}
+	return handle, err
 }
 
 func newHandle() string {
@@ -144,11 +169,14 @@ func (r *Relay) Create(ctx context.Context, owner, name, publicKey string) (Inbo
 		}
 	}
 	for {
-		id := name
-		if id == "" {
-			id = newHandle()
+		handle := name
+		if handle == "" {
+			handle = newHandle()
 		}
-		res, err := r.db.ExecContext(ctx, `INSERT INTO inboxes(id,owner,public_key) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`, id, owner, publicKey)
+		// The prefix can't occur in a v1 public handle, so a new inbox can
+		// never acquire the storage identity of a retired v1 mailbox by name.
+		res, err := r.db.ExecContext(ctx, `INSERT INTO inboxes(id,handle,owner,public_key) VALUES(?,?,?,?)
+			ON CONFLICT(handle) WHERE retired=0 DO NOTHING`, "~"+rand.Text(), handle, owner, publicKey)
 		if err != nil {
 			return Inbox{}, err
 		}
@@ -157,7 +185,7 @@ func (r *Relay) Create(ctx context.Context, owner, name, publicKey string) (Inbo
 			return Inbox{}, err
 		}
 		if n != 0 {
-			return Inbox{id, id + "@" + r.cfg.Host}, nil
+			return Inbox{handle, handle + "@" + r.cfg.Host}, nil
 		}
 		if name != "" {
 			return Inbox{}, RequestError("inbox name already taken")
@@ -169,7 +197,7 @@ func (r *Relay) List(ctx context.Context, owner string) ([]Inbox, error) {
 	if !validOwner(owner) {
 		return nil, notOwner
 	}
-	rows, err := r.db.QueryContext(ctx, "SELECT id FROM inboxes WHERE owner=? ORDER BY id", owner)
+	rows, err := r.db.QueryContext(ctx, "SELECT handle FROM inboxes WHERE owner=? AND retired=0 ORDER BY handle", owner)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +219,7 @@ func (r *Relay) PublicKey(ctx context.Context, recipient string) (string, error)
 		return "", err
 	}
 	var key string
-	err = r.db.QueryRowContext(ctx, "SELECT public_key FROM inboxes WHERE id=?", id).Scan(&key)
+	err = r.db.QueryRowContext(ctx, "SELECT public_key FROM inboxes WHERE handle=? AND retired=0", id).Scan(&key)
 	if errors.Is(err, sql.ErrNoRows) || err == nil && key == "" {
 		return "", RequestError("no public key for this inbox")
 	}

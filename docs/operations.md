@@ -28,9 +28,12 @@ If an existing deployment advertised an IP, change `RELAY_HOST` in `.env` to the
 ## Identities and backups
 
 - Check a member's fingerprint with `ssh-keygen -lf member.pub -E sha256`. Add or remove the approved public key in `authorized_keys` and restart the relay. A new fingerprint is a different owner. Removing a key blocks login; it does **not** remove its inboxes or stop other users from sending to those addresses. Tell senders when an address is no longer in use.
+- Deleting an inbox is different from revoking a key. The owner can run `delete-inbox HANDLE` as SSH user `spool`; this releases that handle, discards its age public key, and removes its received mail and pending uploads. Other inboxes owned by the same key remain intact. Copies already delivered elsewhere continue to count against the original owner's quota until the recipient deletes them or they expire. New mail sent to a reclaimed address goes to its new owner; verify the intended recipient and fetch the current age key before sending sensitive content.
 - Keep the host key across restarts. The relay prints its **public** `host_key` and `host_fingerprint` at startup. For nondefault ports, the trusted `known_hosts` entry begins with `[hostname]:port`; for port 22, use `hostname`. If the key changes unexpectedly, stop and verify with the operator instead of disabling checking.
 - Restrict the data directory to the relay service account (use an appropriate ACL on Windows). In Docker, the process runs as UID/GID `65532`; it needs write access to `/data` and read access to the allowlist and any configured host key.
 - For a consistent backup, stop the relay, copy the **entire** data directory or named volume, then restart. Also back up the allowlist and any externally configured host key separately with appropriate permissions. Restore while the relay is stopped and retain the same hostname. `docker compose down -v` removes the named volume; do not use it to upgrade.
+
+Existing SSH databases upgrade automatically on first start of a release that supports inbox deletion. Back up before upgrading; handles, ownership, stored mail, pending uploads and cursors are preserved. Do not run an older binary against the upgraded store.
 
 ## Migrating a pre-SSH database
 

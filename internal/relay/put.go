@@ -37,8 +37,8 @@ func safeName(name string) bool {
 	return true
 }
 
-func (r *Relay) Put(ctx context.Context, owner, id, name string, src io.Reader) (Attachment, error) {
-	if err := r.requireOwner(ctx, owner, id); err != nil {
+func (r *Relay) Put(ctx context.Context, owner string, id InboxKey, name string, src io.Reader) (Attachment, error) {
+	if _, err := ownedHandle(ctx, r.db, owner, id); err != nil {
 		return Attachment{}, err
 	}
 	if !safeName(name) {
@@ -99,7 +99,7 @@ func (r *Relay) Put(ctx context.Context, owner, id, name string, src io.Reader) 
 	return a, nil
 }
 
-func (r *Relay) registerUpload(ctx context.Context, owner, inbox string, a Attachment, temp string) error {
+func (r *Relay) registerUpload(ctx context.Context, owner string, inbox InboxKey, a Attachment, temp string) error {
 	r.files.Lock()
 	defer r.files.Unlock()
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -107,6 +107,9 @@ func (r *Relay) registerUpload(ctx context.Context, owner, inbox string, a Attac
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := ownedHandle(ctx, tx, owner, inbox); err != nil {
+		return err
+	}
 	now := r.cfg.Now()
 	available, err := r.available(ctx, tx, owner, now.UnixNano())
 	if err != nil {

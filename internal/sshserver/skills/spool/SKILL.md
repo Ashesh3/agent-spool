@@ -1,6 +1,6 @@
 ---
 name: spool
-description: Use when asked to create or list agent inboxes, check mail, send or reply to messages, or transfer attachments through a spool SSH relay. Not for internet email.
+description: Use when asked to create, list or delete agent inboxes, check mail, send or reply to messages, or transfer attachments through a spool SSH relay. Not for internet email.
 ---
 
 # Spool mailbox
@@ -13,6 +13,7 @@ Use OpenSSH with the approved identity, pinned host key, and SSH target the user
 - If the user asks for an inbox named `blob`, run `ssh -nT spool@spool-relay create blob`. Pass the exact name as an argument; it is the real SSH username, **not a local label**. Names are case-sensitive: 1–128 ASCII letters, digits, hyphens or underscores, starting with a letter or digit. `spool` is reserved. If the name is invalid, taken, or the relay does not support named creation, report that; never retry without the name or invent a suffix. If no name was given, ask unless the user wants a generated handle (`create` with no arguments).
 - Capture the JSON locally rather than echoing raw relay output. For named creation check that `inbox_id` equals the requested name and the returned address matches `<inbox_id>@<user-provided DNS name>` (DNS names are case-insensitive). Share only the verified address using that DNS suffix. If a reply contains an IP or different domain, do not print it or disguise it with a local rewrite; ask the operator to correct `RELAY_HOST`. Use the same check when listing or displaying mailbox addresses.
 - Save the verified address, inbox ID, SSH target, public domain and initial cursor `"0"` in local project state, not in this skill. If a create result was lost, list before retrying. Installing the skill alone does not authorize creating or reading mail.
+- Only when the user explicitly asks to **delete the entire inbox**, run `ssh -nT spool@spool-relay delete-inbox NAME` with its exact handle. This erases received mail and staged uploads and immediately releases the alias; it does not recall sent mail. After success, clear that inbox's saved local handle and cursor. Do not delete an inbox just to resolve a naming conflict, or retry a deletion blindly after a lost response.
 
 ## Read, send and transfer
 
@@ -22,7 +23,7 @@ Replace `ME` with your `inbox_id` and `TO` with a recipient handle or local mail
 |---|---|---|
 | Check inbox | `ssh -nT ME@spool-relay poll --since CURSOR --limit 50` | Process `messages`; then persist `next_cursor`. Deduplicate by `message_id` if interrupted. |
 | Send text | `ssh -T ME@spool-relay send TO` | UTF-8 body on stdin; close stdin. Receipt contains `message_id`. |
-| Reply | `ssh -T ME@spool-relay send TO --reply-to ID` | Use the received `from` as `TO` and `message_id` as `ID`. |
+| Reply | `ssh -T ME@spool-relay send TO --reply-to ID` | Use the received `from` and `message_id`. If the original message or sending inbox is gone, the reply is rejected. Never retry it as a fresh send without checking with the user: the name may now belong to someone else. |
 | Attach a file | `ssh -T ME@spool-relay put BASENAME` | Stream file bytes on stdin. Add `--attach ATTACHMENT_ID` to `send`, once per upload. Use `ssh -nT` for file-only sends. |
 | Download | `ssh -nT ME@spool-relay get ATTACHMENT_ID` | Stream raw stdout to a fresh temporary file; publish only after success. |
 | Delete a received message | `ssh -nT ME@spool-relay delete ID` | Only on request; also deletes its attachments. |

@@ -15,7 +15,7 @@ import (
 var skillMarkdown []byte
 
 const (
-	managementCommands = usageError("spool commands: skill, create, list, pubkey")
+	managementCommands = usageError("spool commands: skill, create, list, pubkey, delete-inbox")
 	inboxCommands      = usageError("inbox commands: put, send, poll, get, delete")
 	sendUsage          = usageError("usage: send <recipient> [--attach <id>]... [--reply-to <message_id>] [--encoding plain|age]")
 	pollUsage          = usageError("usage: poll [--since <cursor>] [--limit <1..100>]")
@@ -32,14 +32,14 @@ func (s *session) run(ctx context.Context, line string) error {
 	if i := strings.IndexAny(line, " \t"); i >= 0 {
 		verb, rest = line[:i], line[i+1:]
 	}
-	if s.user != relay.ManagementUser && verb == "put" {
+	if s.inbox != "" && verb == "put" {
 		if len(rest) == 0 {
 			return usageError("usage: put <basename>")
 		}
-		return s.result(s.app.Put(ctx, s.owner, s.user, rest, s.ch))
+		return s.result(s.app.Put(ctx, s.owner, s.inbox, rest, s.ch))
 	}
 	args := strings.FieldsFunc(rest, func(r rune) bool { return r == ' ' || r == '\t' })
-	if s.user == relay.ManagementUser {
+	if s.inbox == "" {
 		return s.manage(ctx, verb, args)
 	}
 	switch verb {
@@ -48,23 +48,23 @@ func (s *session) run(ctx context.Context, line string) error {
 		if err != nil {
 			return err
 		}
-		return s.result(s.app.Send(ctx, s.owner, s.user, opts, s.ch))
+		return s.result(s.app.Send(ctx, s.owner, s.inbox, opts, s.ch))
 	case "poll":
 		since, limit, err := pollOptions(args)
 		if err != nil {
 			return err
 		}
-		return s.app.Poll(ctx, s.owner, s.user, since, limit, s.ch)
+		return s.app.Poll(ctx, s.owner, s.inbox, since, limit, s.ch)
 	case "get":
 		if len(args) != 1 || !operand(args[0]) {
 			return usageError("usage: get <attachment_id>")
 		}
-		return s.app.Get(ctx, s.owner, s.user, args[0], s.ch)
+		return s.app.Get(ctx, s.owner, s.inbox, args[0], s.ch)
 	case "delete":
 		if len(args) != 1 || !messageID(args[0]) {
 			return usageError("usage: delete <message_id>")
 		}
-		err := s.app.Delete(ctx, s.owner, s.user, args[0])
+		err := s.app.Delete(ctx, s.owner, s.inbox, args[0])
 		return s.result(struct {
 			Deleted string `json:"deleted"`
 		}{args[0]}, err)
@@ -93,6 +93,14 @@ func (s *session) manage(ctx context.Context, verb string, args []string) error 
 			key = args[1]
 		}
 		return s.result(s.app.Create(ctx, s.owner, name, key))
+	case "delete-inbox":
+		if len(args) != 1 || !operand(args[0]) {
+			return usageError("usage: delete-inbox <handle>")
+		}
+		err := s.app.DeleteInbox(ctx, s.owner, args[0])
+		return s.result(struct {
+			Deleted string `json:"deleted_inbox"`
+		}{args[0]}, err)
 	case "list":
 		if len(args) != 0 {
 			return usageError("usage: list")

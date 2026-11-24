@@ -13,8 +13,8 @@ import (
 
 type session struct {
 	app   *relay.Relay
-	owner string // verified signing key fingerprint, never an exec argument
-	user  string // management login or owned inbox ID
+	owner string         // verified signing key fingerprint, never an exec argument
+	inbox relay.InboxKey // pinned at authentication; empty for the management login
 	ch    ssh.Channel
 }
 

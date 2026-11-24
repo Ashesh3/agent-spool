@@ -41,13 +41,22 @@ func TestRejectIPAddressAsMailboxDomain(t *testing.T) {
 	}
 }
 
-func testInbox(t *testing.T, r *Relay, owner string) Inbox {
+type testMailbox struct {
+	Inbox
+	key InboxKey
+}
+
+func testInbox(t *testing.T, r *Relay, owner string) testMailbox {
 	t.Helper()
 	box, err := r.Create(t.Context(), owner, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return box
+	key, err := r.ResolveInbox(t.Context(), owner, box.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testMailbox{box, key}
 }
 
 // The SSH handshake is not the only line of defense. Supplying a real inbox
@@ -57,31 +66,31 @@ func TestStoreChecksOwnerWithoutTransport(t *testing.T) {
 	ctx := t.Context()
 	a, b := testOwner("alice"), testOwner("bob")
 	from, to := testInbox(t, r, a), testInbox(t, r, b)
-	file, err := r.Put(ctx, a, from.ID, "hello.bin", strings.NewReader("hello"))
+	file, err := r.Put(ctx, a, from.key, "hello.bin", strings.NewReader("hello"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	msg, err := r.Send(ctx, a, from.ID, SendOptions{To: to.ID, Attachments: []string{file.ID}}, nil)
+	msg, err := r.Send(ctx, a, from.key, SendOptions{To: to.ID, Attachments: []string{file.ID}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Send(ctx, b, from.ID, SendOptions{To: to.ID}, strings.NewReader("forged")); err != notOwner {
+	if _, err := r.Send(ctx, b, from.key, SendOptions{To: to.ID}, strings.NewReader("forged")); err != notOwner {
 		t.Errorf("forged send: %v", err)
 	}
-	if _, err := r.Put(ctx, b, from.ID, "x", strings.NewReader("forged")); err != notOwner {
+	if _, err := r.Put(ctx, b, from.key, "x", strings.NewReader("forged")); err != notOwner {
 		t.Errorf("forged put: %v", err)
 	}
-	if err := r.Poll(ctx, a, to.ID, 0, 1, io.Discard); err != notOwner {
+	if err := r.Poll(ctx, a, to.key, 0, 1, io.Discard); err != notOwner {
 		t.Errorf("unauthorized poll: %v", err)
 	}
-	if err := r.Get(ctx, a, to.ID, file.ID, io.Discard); err != notOwner {
+	if err := r.Get(ctx, a, to.key, file.ID, io.Discard); err != notOwner {
 		t.Errorf("unauthorized get: %v", err)
 	}
-	if err := r.Delete(ctx, a, to.ID, msg.ID); err != notOwner {
+	if err := r.Delete(ctx, a, to.key, msg.ID); err != notOwner {
 		t.Errorf("unauthorized deletion: %v", err)
 	}
 	var data strings.Builder
-	if err := r.Get(ctx, b, to.ID, file.ID, &data); err != nil || data.String() != "hello" {
+	if err := r.Get(ctx, b, to.key, file.ID, &data); err != nil || data.String() != "hello" {
 		t.Fatalf("legitimate read after unauthorized operations: %q, %v", data.String(), err)
 	}
 }
@@ -89,13 +98,13 @@ func TestStoreChecksOwnerWithoutTransport(t *testing.T) {
 func TestConcurrentUploadsShareQuotaAcrossInboxes(t *testing.T) {
 	r := testRelay(t, 5)
 	owner := testOwner("alice")
-	boxes := []Inbox{testInbox(t, r, owner), testInbox(t, r, owner)}
+	boxes := []testMailbox{testInbox(t, r, owner), testInbox(t, r, owner)}
 	start := make(chan struct{})
 	results := make(chan error, len(boxes))
 	for _, box := range boxes {
 		go func() {
 			<-start
-			_, err := r.Put(t.Context(), owner, box.ID, "five.bin", strings.NewReader("12345"))
+			_, err := r.Put(t.Context(), owner, box.key, "five.bin", strings.NewReader("12345"))
 			results <- err
 		}()
 	}
