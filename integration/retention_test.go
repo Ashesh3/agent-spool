@@ -35,7 +35,7 @@ func requireDiskPayload(t *testing.T, dir string, payload []byte, want bool) {
 		t.Fatal(err)
 	}
 	if found != want {
-		t.Fatalf("blob %q present on disk = %t, want %t", payload, found, want)
+		t.Fatalf("%d-byte ciphertext blob present on disk = %t, want %t", len(payload), found, want)
 	}
 }
 
@@ -46,15 +46,16 @@ func TestRestartAndIndependentUploadAndDeliveryClocks(t *testing.T) {
 	k := keys(t)
 	var a, b inbox
 	var abandoned, live, blobID, msgID string
-	pending := []byte("abandoned upload: one hour")
-	delivered := []byte("delivered payload: seven days")
+	var pending, delivered []byte
 	if !t.Run("before restart", func(t *testing.T) {
 		s := start(t, cfg, k)
-		a, b = s.create(t, s.alice, ""), s.create(t, s.bob, "")
-		abandoned = s.put(t, s.alice, a, "abandoned", pending)
-		live = s.put(t, s.alice, a, "still staged", []byte("recoverable stage"))
-		stage := s.put(t, s.alice, a, "delivered", delivered)
-		r := s.send(t, s.alice, a, b.ID+" --attach "+stage, nil)
+		a, b = s.create(t, s.alice), s.create(t, s.bob)
+		pending = seal(t, a, b, []byte("abandoned upload: one hour"))
+		delivered = seal(t, a, b, []byte("delivered payload: seven days"))
+		abandoned = s.putCipher(t, s.alice, a, b, "abandoned", pending)
+		live = s.put(t, s.alice, a, b, "still staged", []byte("recoverable stage"))
+		stage := s.putCipher(t, s.alice, a, b, "delivered", delivered)
+		r := s.send(t, s.alice, a, b, " --attach "+stage, nil)
 		if !r.Expires.Equal(epoch.Add(7 * 24 * time.Hour)) {
 			t.Fatalf("wrong receipt expiry: %s", r.Expires)
 		}
@@ -73,13 +74,13 @@ func TestRestartAndIndependentUploadAndDeliveryClocks(t *testing.T) {
 	s.requireList(t, s.alice, a)
 	s.requireList(t, s.bob, b)
 	clock.step(time.Hour - time.Second)
-	r := s.send(t, s.alice, a, b.ID+" --attach "+live, nil)
+	r := s.send(t, s.alice, a, b, " --attach "+live, nil)
 	if !r.Expires.Equal(clock.now().Add(7 * 24 * time.Hour)) {
 		t.Fatal("retention did not start at send time")
 	}
 	s.exec(t, s.bob, b.ID, "delete "+r.ID, nil, 0)
 	clock.step(time.Second)
-	s.exec(t, s.alice, a.ID, "send "+b.ID+" --attach "+abandoned, nil, 1)
+	s.exec(t, s.alice, a.ID, sendTo(b)+" --attach "+abandoned, nil, 1)
 	if err := s.app.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -98,9 +99,10 @@ func TestRestartAndIndependentUploadAndDeliveryClocks(t *testing.T) {
 		t.Fatal("expired message visible before sweep")
 	}
 	s.exec(t, s.bob, b.ID, "get "+blobID, nil, 1)
+	s.exec(t, s.alice, "spool", "recall "+msgID, nil, 1)
 	if err := s.app.Sweep(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	requireDiskPayload(t, cfg.DataDir, delivered, false)
-	s.send(t, s.alice, a, b.ID, []byte("inbox IDs outlive their mail"))
+	s.send(t, s.alice, a, b, "", []byte("inbox IDs outlive their mail"))
 }

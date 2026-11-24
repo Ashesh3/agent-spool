@@ -19,7 +19,6 @@ import (
 
 type Config struct {
 	DataDir, Host                             string
-	LegacyOwners                              map[string]string
 	MaxFileBytes, MaxMessageBytes, QuotaBytes int64
 	RequestsPerMinute                         int
 	Now                                       func() time.Time
@@ -96,8 +95,6 @@ func Open(cfg Config) (*Relay, error) {
 		blobs: filepath.Join(dir, "blobs"), staging: filepath.Join(dir, "staging"),
 		members: make(map[string]*member),
 	}
-	owners := cfg.LegacyOwners
-	cfg.LegacyOwners = nil
 	r.cfg = cfg
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
@@ -123,7 +120,7 @@ func Open(cfg Config) (*Relay, error) {
 		return nil, err
 	}
 	r.db.SetMaxOpenConns(12)
-	if err = r.initialize(owners); err != nil {
+	if err = r.initialize(); err != nil {
 		return nil, fmt.Errorf("initialize relay database: %w", err)
 	}
 	if err := os.MkdirAll(r.blobs, 0700); err != nil {

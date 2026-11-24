@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"strings"
@@ -12,7 +13,7 @@ import (
 // goroutines or guessing when the operation has finished its initial checks.
 type interruptedInput struct {
 	beforeRead func()
-	body       *strings.Reader
+	body       *bytes.Reader
 }
 
 func (s *interruptedInput) Read(p []byte) (int, error) {
@@ -24,7 +25,7 @@ func (s *interruptedInput) Read(p []byte) (int, error) {
 }
 
 func TestReclaimDuringStdin(t *testing.T) {
-	for _, op := range []string{"put", "send-from", "send-to"} {
+	for _, op := range []string{"put-from", "put-to", "send-from", "send-to"} {
 		t.Run(op, func(t *testing.T) {
 			r := testRelay(t, 0)
 			ctx := t.Context()
@@ -32,30 +33,32 @@ func TestReclaimDuringStdin(t *testing.T) {
 			from, to := testInbox(t, r, a), testInbox(t, r, b)
 			owner, old, other := a, from, to
 			want := notOwner
-			if op == "send-to" {
+			if strings.HasSuffix(op, "-to") {
 				owner, old, other = b, to, from
 				want = RequestError("recipient inbox not found")
 			}
 			// Keep the retired row alive: merely finding its ID or satisfying a
 			// foreign key must not authorize a stage or delivery.
-			if _, err := r.Send(ctx, owner, old.key, SendOptions{To: other.ID}, strings.NewReader("keep")); err != nil {
+			keep := encryptForMailboxes(t, old, other, "keep")
+			if _, err := r.Send(ctx, owner, old.key, other.destination(), bytes.NewReader(keep)); err != nil {
 				t.Fatal(err)
 			}
-			src := &interruptedInput{body: strings.NewReader("late"), beforeRead: func() {
+			late := encryptForMailboxes(t, from, to, "late")
+			src := &interruptedInput{body: bytes.NewReader(late), beforeRead: func() {
 				if err := r.DeleteInbox(ctx, owner, old.ID); err != nil {
 					t.Fatal(err)
 				}
-				// Reuse with the very same owner so an owner+handle check alone
-				// cannot distinguish the old and new inboxes.
-				if _, err := r.Create(ctx, owner, old.ID, ""); err != nil {
+				// Even re-registering the same public key and owner cannot
+				// carry an in-flight operation into a new inbox incarnation.
+				if _, err := r.Create(ctx, owner, old.ID, old.recipient.String()); err != nil {
 					t.Fatal(err)
 				}
 			}}
 			var err error
-			if op == "put" {
-				_, err = r.Put(ctx, a, from.key, "late.bin", src)
+			if strings.HasPrefix(op, "put-") {
+				_, err = r.Put(ctx, a, from.key, to.ID, to.recipient.String(), "late.bin", src)
 			} else {
-				_, err = r.Send(ctx, a, from.key, SendOptions{To: to.ID}, src)
+				_, err = r.Send(ctx, a, from.key, to.destination(), src)
 			}
 			if src.beforeRead != nil || !errors.Is(err, want) {
 				t.Fatalf("expected %q after handle reuse during stdin, got %v", want, err)
@@ -67,7 +70,7 @@ func TestReclaimDuringStdin(t *testing.T) {
 			if messages != 1 || pending != 0 {
 				t.Fatalf("got %d messages and %d staged uploads; want only the original message", messages, pending)
 			}
-			if op == "put" {
+			if strings.HasPrefix(op, "put-") {
 				for _, dir := range []string{r.staging, r.blobs} {
 					entries, err := os.ReadDir(dir)
 					if err != nil || len(entries) != 0 {
@@ -86,14 +89,17 @@ func TestReplyExpiresDuringStdin(t *testing.T) {
 	r.cfg.Now = func() time.Time { return now }
 	a, b := testOwner("alice"), testOwner("bob")
 	from, to := testInbox(t, r, a), testInbox(t, r, b)
-	original, err := r.Send(ctx, a, from.key, SendOptions{To: to.ID}, strings.NewReader("question"))
+	question := encryptForMailboxes(t, from, to, "question")
+	original, err := r.Send(ctx, a, from.key, to.destination(), bytes.NewReader(question))
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := &interruptedInput{body: strings.NewReader("answer"), beforeRead: func() { now = original.Expires }}
-	_, err = r.Send(ctx, b, to.key, SendOptions{To: from.ID, ReplyTo: original.ID}, src)
-	var rejected RequestError
-	if src.beforeRead != nil || !errors.As(err, &rejected) {
+	answer := encryptForMailboxes(t, to, from, "answer")
+	src := &interruptedInput{body: bytes.NewReader(answer), beforeRead: func() { now = original.Expires }}
+	opts := from.destination()
+	opts.ReplyTo = original.ID
+	_, err = r.Send(ctx, b, to.key, opts, src)
+	if src.beforeRead != nil || !errors.Is(err, RequestError("reply_to message unavailable for this recipient")) {
 		t.Fatalf("expected a request error after the original message expired, got %v", err)
 	}
 }

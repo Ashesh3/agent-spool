@@ -15,9 +15,9 @@ import (
 var skillMarkdown []byte
 
 const (
-	managementCommands = usageError("spool commands: skill, create, list, pubkey, delete-inbox")
+	managementCommands = usageError("spool commands: skill, create, list, pubkey, recall, delete-inbox")
 	inboxCommands      = usageError("inbox commands: put, send, poll, get, delete")
-	sendUsage          = usageError("usage: send <recipient> [--attach <id>]... [--reply-to <message_id>] [--encoding plain|age]")
+	sendUsage          = usageError("usage: send <recipient> --recipient-key <age recipient> [--attach <id>]... [--reply-to <message_id>]")
 	pollUsage          = usageError("usage: poll [--since <cursor>] [--limit <1..100>]")
 )
 
@@ -27,16 +27,15 @@ func (s *session) run(ctx context.Context, line string) error {
 	if !utf8.ValidString(line) || strings.ContainsFunc(line, func(r rune) bool { return r != '\t' && unicode.IsControl(r) }) {
 		return usageError("command must be a single UTF-8 line")
 	}
-	line = strings.TrimLeft(line, " \t")
-	verb, rest := line, ""
-	if i := strings.IndexAny(line, " \t"); i >= 0 {
-		verb, rest = line[:i], line[i+1:]
-	}
+	verb, rest := commandWord(line)
 	if s.inbox != "" && verb == "put" {
-		if len(rest) == 0 {
-			return usageError("usage: put <basename>")
+		to, rest := commandWord(rest)
+		flag, rest := commandWord(rest)
+		key, name := commandWord(rest)
+		if !operand(to) || flag != "--recipient-key" || !operand(key) || name == "" {
+			return usageError("usage: put <recipient> --recipient-key <age recipient> <basename>")
 		}
-		return s.result(s.app.Put(ctx, s.owner, s.inbox, rest, s.ch))
+		return s.result(s.app.Put(ctx, s.owner, s.inbox, to, key, name, s.ch))
 	}
 	args := strings.FieldsFunc(rest, func(r rune) bool { return r == ' ' || r == '\t' })
 	if s.inbox == "" {
@@ -82,17 +81,22 @@ func (s *session) manage(ctx context.Context, verb string, args []string) error 
 		_, err := s.ch.Write(skillMarkdown)
 		return err
 	case "create":
-		var name, key string
+		var name string
 		if len(args) > 0 && operand(args[0]) {
 			name, args = args[0], args[1:]
 		}
-		if len(args) != 0 {
-			if len(args) != 2 || args[0] != "--public-key" || !operand(args[1]) {
-				return usageError("usage: create [name] [--public-key <age recipient>]")
-			}
-			key = args[1]
+		if len(args) != 2 || args[0] != "--public-key" || !operand(args[1]) {
+			return usageError("usage: create [name] --public-key <age X25519 recipient>")
 		}
-		return s.result(s.app.Create(ctx, s.owner, name, key))
+		return s.result(s.app.Create(ctx, s.owner, name, args[1]))
+	case "recall":
+		if len(args) != 1 || !messageID(args[0]) {
+			return usageError("usage: recall <sent_message_id>")
+		}
+		err := s.app.Recall(ctx, s.owner, args[0])
+		return s.result(struct {
+			Recalled string `json:"recalled"`
+		}{args[0]}, err)
 	case "delete-inbox":
 		if len(args) != 1 || !operand(args[0]) {
 			return usageError("usage: delete-inbox <handle>")
@@ -123,6 +127,14 @@ func (s *session) manage(ctx context.Context, verb string, args []string) error 
 	default:
 		return managementCommands
 	}
+}
+
+func commandWord(line string) (string, string) {
+	line = strings.TrimLeft(line, " \t")
+	if i := strings.IndexAny(line, " \t"); i >= 0 {
+		return line[:i], line[i+1:]
+	}
+	return line, ""
 }
 
 func operand(s string) bool { return len(s) > 0 && s[0] != '-' }
@@ -159,17 +171,17 @@ func sendOptions(args []string) (relay.SendOptions, error) {
 				return opts, sendUsage
 			}
 			opts.ReplyTo = value
-		case "--encoding":
-			if opts.Encoding != "" || (value != "plain" && value != "age") {
+		case "--recipient-key":
+			if opts.RecipientKey != "" {
 				return opts, sendUsage
 			}
-			opts.Encoding = value
+			opts.RecipientKey = value
 		default:
 			return opts, sendUsage
 		}
 	}
-	if opts.Encoding == "" {
-		opts.Encoding = "plain"
+	if opts.RecipientKey == "" {
+		return opts, sendUsage
 	}
 	return opts, nil
 }

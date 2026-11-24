@@ -14,7 +14,7 @@ The integration suite starts ephemeral SSH listeners with generated identities a
 - `cmd/spool-relay/`: host identity, configuration, listener, and cleanup lifecycle.
 - `internal/relay/`: mailbox ownership, SQLite metadata, attachment storage, quotas, and expiry.
 - `internal/sshserver/`: SSH authentication, session handling, command parsing, and the embedded `spool` skill.
-- `integration/`: end-to-end SSH behavior, including ownership boundaries and migration.
+- `integration/`: end-to-end SSH behavior, including ownership, encrypted delivery, recall, and storage safety.
 
 Keep changes focused. For a behavior change, include a test that would have caught the old behavior. Keep the embedded skill in sync with user-visible SSH commands. Never commit `.env`, relay data, allowlists, host private keys, or generated release archives. Report security issues as described in [SECURITY.md](SECURITY.md).
 

@@ -14,28 +14,6 @@ import (
 
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// Old mailbox secrets cannot identify an SSH owner. Only the administrator's
-// explicit, allowlisted mapping can transfer ownership of an existing inbox.
-func legacyOwners(path string, allowed map[string]bool) (map[string]string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	owners := make(map[string]string)
-	for n, line := range strings.Split(string(b), "\n") {
-		line, _, _ = strings.Cut(line, "#")
-		f := strings.Fields(line)
-		if len(f) == 0 {
-			continue
-		}
-		if len(f) != 2 || !dnsLabel.MatchString(f[0]) || !allowed[f[1]] || owners[f[0]] != "" {
-			return nil, fmt.Errorf("invalid ownership mapping on line %d: expected a unique inbox ID and an allowlisted SHA256 fingerprint", n+1)
-		}
-		owners[f[0]] = f[1]
-	}
-	return owners, nil
-}
-
 type settings struct {
 	relay.Config
 	listen, hostKeyFile string
@@ -64,12 +42,6 @@ func loadSettings() (settings, error) {
 	s.allowed, err = sshserver.ParseAuthorizedKeys(keys)
 	if err != nil {
 		return s, fmt.Errorf("authorized keys: %w", err)
-	}
-	if path := os.Getenv("LEGACY_OWNERS_FILE"); path != "" {
-		s.LegacyOwners, err = legacyOwners(path, s.allowed)
-		if err != nil {
-			return s, fmt.Errorf("legacy owners: %w", err)
-		}
 	}
 	s.hostKeyFile = os.Getenv("SSH_HOST_KEY_FILE")
 	s.listen, s.DataDir = os.Getenv("LISTEN_ADDR"), os.Getenv("DATA_DIR")

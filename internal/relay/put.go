@@ -37,15 +37,17 @@ func safeName(name string) bool {
 	return true
 }
 
-func (r *Relay) Put(ctx context.Context, owner string, id InboxKey, name string, src io.Reader) (Attachment, error) {
-	if _, err := ownedHandle(ctx, r.db, owner, id); err != nil {
+func (r *Relay) Put(ctx context.Context, owner string, id InboxKey, to, recipientKey, name string, src io.Reader) (Attachment, error) {
+	handle, err := r.localID(to)
+	if err != nil {
+		return Attachment{}, err
+	}
+	target, recipients, err := encryptionPeers(ctx, r.db, owner, id, handle, recipientKey)
+	if err != nil {
 		return Attachment{}, err
 	}
 	if !safeName(name) {
 		return Attachment{}, RequestError("expected a safe attachment basename of at most 255 UTF-8 bytes")
-	}
-	if src == nil {
-		return Attachment{}, errors.New("no attachment input reader")
 	}
 	m, err := r.acquireWriter(ctx, owner)
 	if err != nil {
@@ -70,18 +72,15 @@ func (r *Relay) Put(ctx context.Context, owner string, id InboxKey, name string,
 	// Bound even uncommitted disk usage without trusting an input length or
 	// holding any SQLite connection or global lock while waiting for stdin.
 	limit := min(r.cfg.MaxFileBytes, r.cfg.MaxMessageBytes, available)
-	a.Size, err = io.Copy(f, io.LimitReader(src, limit))
-	if err == nil && a.Size == limit {
-		var one [1]byte
-		if n, probeErr := io.ReadFull(src, one[:]); n != 0 {
-			if limit == available {
-				err = quotaExceeded
-			} else {
-				err = RequestError("attachment exceeds byte limit")
-			}
-		} else if !errors.Is(probeErr, io.EOF) {
-			err = probeErr
+	a.Size, err = copyAgeEnvelope(f, src, limit, recipients)
+	if errors.Is(err, errEnvelopeLimit) {
+		if limit == available {
+			err = quotaExceeded
+		} else {
+			err = RequestError("attachment exceeds byte limit")
 		}
+	} else if err == nil && a.Size == 0 {
+		err = RequestError("encrypted attachment required")
 	}
 	if err == nil {
 		err = f.Sync()
@@ -93,13 +92,13 @@ func (r *Relay) Put(ctx context.Context, owner string, id InboxKey, name string,
 	if closeErr != nil {
 		return Attachment{}, closeErr
 	}
-	if err := r.registerUpload(ctx, owner, id, a, temp); err != nil {
+	if err := r.registerUpload(ctx, owner, id, handle, recipientKey, target, a, temp); err != nil {
 		return Attachment{}, err
 	}
 	return a, nil
 }
 
-func (r *Relay) registerUpload(ctx context.Context, owner string, inbox InboxKey, a Attachment, temp string) error {
+func (r *Relay) registerUpload(ctx context.Context, owner string, inbox InboxKey, handle, recipientKey string, target InboxKey, a Attachment, temp string) error {
 	r.files.Lock()
 	defer r.files.Unlock()
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -107,8 +106,12 @@ func (r *Relay) registerUpload(ctx context.Context, owner string, inbox InboxKey
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := ownedHandle(ctx, tx, owner, inbox); err != nil {
+	current, _, err := encryptionPeers(ctx, tx, owner, inbox, handle, recipientKey)
+	if err != nil {
 		return err
+	}
+	if current != target {
+		return RequestError("recipient inbox not found")
 	}
 	now := r.cfg.Now()
 	available, err := r.available(ctx, tx, owner, now.UnixNano())
@@ -118,9 +121,9 @@ func (r *Relay) registerUpload(ctx context.Context, owner string, inbox InboxKey
 	if a.Size > available {
 		return quotaExceeded
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO pending(id,inbox,filename,size,expires)
-		SELECT ?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM garbage WHERE id=? UNION ALL SELECT 1 FROM attachments WHERE id=?)`,
-		a.ID, inbox, a.Filename, a.Size, now.Add(pendingTTL).UnixNano(), a.ID, a.ID)
+	res, err := tx.ExecContext(ctx, `INSERT INTO pending(id,inbox,recipient,filename,size,expires)
+		SELECT ?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM garbage WHERE id=? UNION ALL SELECT 1 FROM attachments WHERE id=?)`,
+		a.ID, inbox, target, a.Filename, a.Size, now.Add(pendingTTL).UnixNano(), a.ID, a.ID)
 	if err != nil {
 		return err
 	}

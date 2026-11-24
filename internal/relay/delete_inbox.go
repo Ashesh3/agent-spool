@@ -22,7 +22,7 @@ func (r *Relay) DeleteInbox(ctx context.Context, owner, handle string) error {
 		return err
 	}
 	for _, stmt := range [...]string{
-		`DELETE FROM pending WHERE inbox=?`,
+		`DELETE FROM pending WHERE inbox=?1 OR recipient=?1`,
 		`DELETE FROM messages WHERE recipient=?`,
 		`UPDATE inboxes SET retired=1, public_key='' WHERE id=?`,
 		// If other recipients still have mail from this incarnation, retain

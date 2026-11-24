@@ -1,15 +1,13 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"errors"
 	"io"
 	"strconv"
-	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 const (
@@ -20,8 +18,8 @@ const (
 )
 
 type SendOptions struct {
-	To, ReplyTo, Encoding string
-	Attachments           []string
+	To, RecipientKey, ReplyTo string
+	Attachments               []string
 }
 
 type Attachment struct {
@@ -70,18 +68,9 @@ func (r *Relay) acquireWriter(ctx context.Context, owner string) (*member, error
 func (m *member) releaseWriter() { <-m.upload }
 
 func (r *Relay) Send(ctx context.Context, owner string, id InboxKey, opts SendOptions, src io.Reader) (Receipt, error) {
-	if _, err := ownedHandle(ctx, r.db, owner, id); err != nil {
-		return Receipt{}, err
-	}
 	handle, err := r.localID(opts.To)
 	if err != nil {
 		return Receipt{}, err
-	}
-	if opts.Encoding == "" {
-		opts.Encoding = "plain"
-	}
-	if opts.Encoding != "plain" && opts.Encoding != "age" {
-		return Receipt{}, RequestError("unknown message encoding")
 	}
 	var replyID int64
 	if opts.ReplyTo != "" {
@@ -105,38 +94,21 @@ func (r *Relay) Send(ctx context.Context, owner string, id InboxKey, opts SendOp
 	}
 	// Pin the addressee before waiting on stdin: a recycled handle names a
 	// different inbox even if both generations have the same owner.
-	to, err := activeKey(ctx, r.db, handle)
+	to, recipients, err := encryptionPeers(ctx, r.db, owner, id, handle, opts.RecipientKey)
 	if err != nil {
 		return Receipt{}, err
 	}
 	// No database connection or per-owner writer is held over SSH stdin.
-	var body strings.Builder
-	if src != nil {
-		limit := min(int64(bodyLimit), r.cfg.MaxMessageBytes)
-		n, err := io.Copy(&body, io.LimitReader(src, limit+1))
-		if err != nil {
-			return Receipt{}, err
-		}
-		if n > limit {
-			return Receipt{}, RequestError("message body exceeds byte limit")
-		}
+	var body bytes.Buffer
+	size, err := copyAgeEnvelope(&body, src, min(int64(bodyLimit), r.cfg.MaxMessageBytes), recipients)
+	if errors.Is(err, errEnvelopeLimit) {
+		return Receipt{}, RequestError("message body exceeds byte limit")
 	}
-	text := body.String()
-	if text == "" && len(opts.Attachments) == 0 {
+	if err != nil {
+		return Receipt{}, err
+	}
+	if size == 0 && len(opts.Attachments) == 0 {
 		return Receipt{}, RequestError("body or attachment required")
-	}
-	if opts.Encoding == "plain" && !utf8.ValidString(text) {
-		return Receipt{}, RequestError("plain body must be UTF-8")
-	}
-	if opts.Encoding == "age" {
-		// Do not accept padded base64 followed by a second stream, even if
-		// their boundary happens to coincide with a decoder read boundary.
-		if i := strings.IndexByte(text, '='); i != -1 && strings.Trim(text[i:], "=\r\n") != "" {
-			return Receipt{}, RequestError("age body must be standard base64")
-		}
-		if _, err := io.Copy(io.Discard, base64.NewDecoder(base64.StdEncoding.Strict(), strings.NewReader(text))); err != nil {
-			return Receipt{}, RequestError("age body must be standard base64")
-		}
 	}
 	m, err := r.acquireWriter(ctx, owner)
 	if err != nil {
@@ -150,10 +122,7 @@ func (r *Relay) Send(ctx context.Context, owner string, id InboxKey, opts SendOp
 	defer tx.Rollback()
 	now := r.cfg.Now().UTC()
 	expires := now.Add(messageTTL)
-	if _, err := ownedHandle(ctx, tx, owner, id); err != nil {
-		return Receipt{}, err
-	}
-	current, err := activeKey(ctx, tx, handle)
+	current, _, err := encryptionPeers(ctx, tx, owner, id, handle, opts.RecipientKey)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -176,14 +145,13 @@ func (r *Relay) Send(ctx context.Context, owner string, id InboxKey, opts SendOp
 	if err != nil {
 		return Receipt{}, err
 	}
-	size := int64(len(text))
 	if size > available {
 		return Receipt{}, quotaExceeded
 	}
 	// Insert with the body charge, then add each file's charge in the same
 	// transaction. A missing, expired or already-used ID rolls back the lot.
-	res, err := tx.ExecContext(ctx, `INSERT INTO messages(sender,recipient,body,encoding,reply_to,created,expires,byte_count)
-		VALUES(?,?,?,?,?,?,?,?)`, id, to, text, opts.Encoding, opts.ReplyTo, now.UnixNano(), expires.UnixNano(), size)
+	res, err := tx.ExecContext(ctx, `INSERT INTO messages(sender,recipient,body,reply_to,created,expires,byte_count)
+		VALUES(?,?,coalesce(?,X''),?,?,?,?)`, id, to, body.Bytes(), opts.ReplyTo, now.UnixNano(), expires.UnixNano(), size)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -194,8 +162,8 @@ func (r *Relay) Send(ctx context.Context, owner string, id InboxKey, opts SendOp
 	for _, a := range opts.Attachments {
 		var added int64
 		err := tx.QueryRowContext(ctx, `INSERT INTO attachments(id,message_id,filename,size)
-			SELECT id,?,filename,size FROM pending WHERE id=? AND inbox=? AND expires>? RETURNING size`,
-			messageID, a, id, now.UnixNano()).Scan(&added)
+			SELECT id,?,filename,size FROM pending WHERE id=? AND inbox=? AND recipient=? AND expires>? RETURNING size`,
+			messageID, a, id, to, now.UnixNano()).Scan(&added)
 		if errors.Is(err, sql.ErrNoRows) {
 			return Receipt{}, RequestError("staged attachment unavailable for this inbox")
 		}

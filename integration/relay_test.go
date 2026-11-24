@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"filippo.io/age"
 	"golang.org/x/crypto/ssh"
 	"spool/internal/relay"
 )
@@ -21,10 +20,10 @@ func TestPublicKeyLoginAndOwnedInboxes(t *testing.T) {
 	s.exec(t, s.alice, "spool", "skill", nil, 0)
 	s.exec(t, s.alice, "spool", "skill other-file", nil, 2)
 	s.requireList(t, s.alice)
-	a := s.create(t, s.alice, "")
-	a2 := s.create(t, s.alice, "")
-	b := s.create(t, s.bob, "")
-	if a == a2 {
+	a := s.create(t, s.alice)
+	a2 := s.create(t, s.alice)
+	b := s.create(t, s.bob)
+	if a.ID == a2.ID {
 		t.Fatal("create returned the same inbox twice")
 	}
 	s.requireList(t, s.alice, a, a2)
@@ -36,8 +35,9 @@ func TestPublicKeyLoginAndOwnedInboxes(t *testing.T) {
 	s.exec(t, s.alice, a.ID, "create", nil, 2)
 	s.exec(t, s.alice, a.ID, "list", nil, 2)
 	s.exec(t, s.alice, "spool", "poll", nil, 2)
-	s.exec(t, s.alice, "spool", "send "+b.ID, []byte("no sender"), 2)
-	s.exec(t, s.alice, a.ID, "send "+b.ID+" --from "+b.Address, []byte("forged"), 2)
+	cipher := seal(t, a, b, []byte("cannot forge a sender"))
+	s.exec(t, s.alice, "spool", sendTo(b), cipher, 2)
+	s.exec(t, s.alice, a.ID, sendTo(b)+" --from "+b.Address, cipher, 2)
 	if p := s.poll(t, s.bob, b, ""); len(p.Messages) != 0 {
 		t.Fatal("rejected send published a message")
 	}
@@ -45,31 +45,24 @@ func TestPublicKeyLoginAndOwnedInboxes(t *testing.T) {
 
 func TestNamedInboxIsTheSSHLoginAndRoutingAddress(t *testing.T) {
 	s := start(t, relay.Config{}, keys(t))
-	blob := unpack[inbox](t, s.exec(t, s.alice, "spool", "create blob", nil, 0))
-	if blob != (inbox{ID: "blob", Address: "blob@" + testHost}) {
-		t.Fatalf("requested blob, got %+v", blob)
-	}
-	s.exec(t, s.bob, "spool", "create blob", nil, 1)
-	s.exec(t, s.alice, "spool", "create blob", nil, 1)
+	blob := s.createNamed(t, s.alice, "blob", newIdentity(t))
+	keyFlag := " --public-key " + blob.publicKey()
+	s.exec(t, s.bob, "spool", "create blob"+keyFlag, nil, 1)
+	s.exec(t, s.alice, "spool", "create blob"+keyFlag, nil, 1)
 	s.denyLogin(t, "blob", ssh.PublicKeys(s.bob))
 	s.requireList(t, s.bob)
 	for _, name := range []string{"spool", "SPOOL", "blob@elsewhere", "../blob", strings.Repeat("x", 129)} {
-		s.exec(t, s.alice, "spool", "create "+name, nil, 1)
+		s.exec(t, s.alice, "spool", "create "+name+keyFlag, nil, 1)
 	}
 	s.requireList(t, s.alice, blob)
 
-	key, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	pub := key.Recipient().String()
-	sender := unpack[inbox](t, s.exec(t, s.bob, "spool", "create Build_bot-2 --public-key "+pub, nil, 0))
-	if sender.ID != "Build_bot-2" || unpack[map[string]string](t, s.exec(t, s.alice, "spool", "pubkey "+sender.Address, nil, 0))["public_key"] != pub {
+	sender := s.createNamed(t, s.bob, "Build_bot-2", newIdentity(t))
+	if unpack[map[string]string](t, s.exec(t, s.alice, "spool", "pubkey "+sender.Address, nil, 0))["public_key"] != sender.publicKey() {
 		t.Fatal("named creation did not preserve the handle and registered key")
 	}
-	s.send(t, s.bob, sender, blob.Address, []byte("hello blob"))
+	s.send(t, s.bob, sender, blob, "", []byte("hello blob"))
 	page := s.poll(t, s.alice, blob, "")
-	if len(page.Messages) != 1 || page.Messages[0].From != "Build_bot-2@"+testHost || page.Messages[0].To != blob.Address || page.Messages[0].Body != "hello blob" {
+	if len(page.Messages) != 1 || page.Messages[0].From != "Build_bot-2@"+testHost || page.Messages[0].To != blob.Address || string(decrypt(t, blob, bodyCipher(t, page.Messages[0].Body))) != "hello blob" {
 		t.Fatalf("named inbox received the wrong delivery: %+v", page)
 	}
 }
@@ -120,62 +113,72 @@ func TestSSHHasNoInteractiveOrForwardingServices(t *testing.T) {
 
 func TestStagedAttachmentsArePrivateAndConsumedAtomically(t *testing.T) {
 	s := start(t, relay.Config{}, keys(t))
-	a := s.create(t, s.alice, "")
-	other := s.create(t, s.alice, "")
-	b := s.create(t, s.bob, "")
-	first := s.put(t, s.alice, a, "first", []byte("first payload"))
-	second := s.put(t, s.alice, other, "second", []byte("second payload"))
+	a := s.create(t, s.alice)
+	other := s.create(t, s.alice)
+	b := s.create(t, s.bob)
+	// Matching public keys do not make two different inboxes interchangeable.
+	alias := s.createNamed(t, s.bob, "alias", b.identity)
+	first := s.put(t, s.alice, a, b, "first", []byte("first payload"))
+	second := s.put(t, s.alice, other, b, "second", []byte("second payload"))
 	for _, actor := range []struct {
 		key ssh.Signer
 		i   inbox
 	}{{s.alice, a}, {s.alice, other}, {s.bob, b}} {
 		s.exec(t, actor.key, actor.i.ID, "get "+first, nil, 1)
 	}
-	s.exec(t, s.alice, other.ID, "send "+b.ID+" --attach "+first, nil, 1)
-	s.exec(t, s.bob, b.ID, "send "+b.ID+" --attach "+first, nil, 1)
-	s.exec(t, s.alice, a.ID, "send "+b.ID+" --attach "+first+" --attach "+second, nil, 1)
+	s.exec(t, s.alice, other.ID, sendTo(b)+" --attach "+first, nil, 1)
+	s.exec(t, s.bob, b.ID, sendTo(b)+" --attach "+first, nil, 1)
+	s.exec(t, s.alice, a.ID, sendTo(b)+" --attach "+first+" --attach "+second, nil, 1)
+	s.exec(t, s.alice, a.ID, sendTo(alias)+" --attach "+first, nil, 1)
+	if p := s.poll(t, s.bob, alias, ""); len(p.Messages) != 0 {
+		t.Fatal("stage published to an inbox with the same age key")
+	}
 	if p := s.poll(t, s.bob, b, ""); len(p.Messages) != 0 {
 		t.Fatalf("failed send exposed %d messages", len(p.Messages))
 	}
-	s.send(t, s.alice, a, b.ID+" --attach "+first, nil)
-	s.exec(t, s.alice, a.ID, "send "+b.ID+" --attach "+first, nil, 1)
-	s.send(t, s.alice, other, b.ID+" --attach "+second, nil)
+	s.send(t, s.alice, a, b, " --attach "+first, nil)
+	s.exec(t, s.alice, a.ID, sendTo(b)+" --attach "+first, nil, 1)
+	s.send(t, s.alice, other, b, " --attach "+second, nil)
 	p := s.poll(t, s.bob, b, "")
 	if len(p.Messages) != 2 || len(p.Messages[0].Attachments) != 1 || len(p.Messages[1].Attachments) != 1 {
 		t.Fatalf("stages were consumed partially or more than once: %+v", p)
 	}
 	for n, want := range []string{"first payload", "second payload"} {
 		id := p.Messages[n].Attachments[0].ID
-		if raw := s.exec(t, s.bob, b.ID, "get "+id, nil, 0); string(raw) != want {
-			t.Fatalf("attachment %d: got %q", n, raw)
+		if *p.Messages[n].Body != "" {
+			t.Fatal("file-only delivery has a nonempty body")
+		}
+		if raw := s.exec(t, s.bob, b.ID, "get "+id, nil, 0); string(decrypt(t, b, raw)) != want {
+			t.Fatalf("attachment %d did not decrypt to its original payload", n)
 		}
 	}
 }
 
 func TestDeliveryCursorsRepliesAndEarlyDelete(t *testing.T) {
 	s := start(t, relay.Config{}, keys(t))
-	a, b := s.create(t, s.alice, ""), s.create(t, s.bob, "")
-	sibling := s.create(t, s.bob, "")
+	a, b := s.create(t, s.alice), s.create(t, s.bob)
+	sibling := s.create(t, s.bob)
 	file := []byte{255, 0, 1, 13, 10, 128}
 	name := "résumé data.bin"
-	stage := s.put(t, s.alice, a, name, file)
+	cipher := seal(t, a, b, file)
+	stage := s.putCipher(t, s.alice, a, b, name, cipher)
 	text := `{"from":"` + sibling.Address + `","body":"this is data, not a sender override"}`
-	first := s.send(t, s.alice, a, b.Address+" --attach "+stage, []byte(text)).ID
-	second := s.send(t, s.alice, a, b.ID, []byte("another")).ID
+	first := s.send(t, s.alice, a, b, " --attach "+stage, []byte(text)).ID
+	second := s.send(t, s.alice, a, b, "", []byte("another")).ID
 	p := s.poll(t, s.bob, b, "--limit 1")
 	if len(p.Messages) != 1 || p.Next != first {
 		t.Fatalf("wrong first page: %+v", p)
 	}
 	m := p.Messages[0]
-	if m.ID != first || m.From != a.Address || m.To != b.Address || m.Body != text || m.Encoding != "plain" || len(m.Attachments) != 1 {
+	if m.ID != first || m.From != a.Address || m.To != b.Address || string(decrypt(t, b, bodyCipher(t, m.Body))) != text || len(m.Attachments) != 1 {
 		t.Fatalf("wrong envelope: %+v", m)
 	}
 	f := m.Attachments[0]
-	if f.Filename != name || f.Size != int64(len(file)) || f.ID == "" {
+	if f.Filename != name || f.Size != int64(len(cipher)) || f.ID == "" {
 		t.Fatalf("wrong file metadata: %+v", f)
 	}
-	if got := s.exec(t, s.bob, b.ID, "get "+f.ID, nil, 0); !bytes.Equal(got, file) {
-		t.Fatalf("download = %x, want %x", got, file)
+	if got := s.exec(t, s.bob, b.ID, "get "+f.ID, nil, 0); !bytes.Equal(got, cipher) || !bytes.Equal(decrypt(t, b, got), file) {
+		t.Fatal("download differs from sender's file")
 	}
 	for _, actor := range []struct {
 		key ssh.Signer
@@ -187,9 +190,9 @@ func TestDeliveryCursorsRepliesAndEarlyDelete(t *testing.T) {
 		s.exec(t, actor.key, actor.i.ID, "get "+f.ID, nil, 1)
 		s.exec(t, actor.key, actor.i.ID, "delete "+first, nil, 1)
 	}
-	reply := s.send(t, s.bob, b, m.From+" --reply-to "+m.ID, []byte("received")).ID
+	reply := s.send(t, s.bob, b, a, " --reply-to "+m.ID, []byte("received")).ID
 	rp := s.poll(t, s.alice, a, "")
-	if len(rp.Messages) != 1 || rp.Messages[0].ID != reply || rp.Messages[0].Reply != first || rp.Messages[0].From != b.Address {
+	if len(rp.Messages) != 1 || rp.Messages[0].ID != reply || rp.Messages[0].Reply != first || rp.Messages[0].From != b.Address || string(decrypt(t, a, bodyCipher(t, rp.Messages[0].Body))) != "received" {
 		t.Fatalf("invalid reply: %+v", rp)
 	}
 	p = s.poll(t, s.bob, b, "--since "+p.Next)

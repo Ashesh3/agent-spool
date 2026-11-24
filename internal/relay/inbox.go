@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,7 +16,7 @@ type messageView struct {
 	ID          string          `json:"message_id"`
 	From        string          `json:"from"`
 	To          string          `json:"to"`
-	Body        string          `json:"body"`
+	Body        []byte          `json:"body"`
 	Encoding    string          `json:"encoding"`
 	ReplyTo     string          `json:"reply_to,omitempty"`
 	Created     time.Time       `json:"created_at"`
@@ -25,7 +24,7 @@ type messageView struct {
 	Attachments json.RawMessage `json:"attachments"`
 }
 
-const messageQuery = `SELECT sender.handle, m.body, m.encoding, m.reply_to, m.created, m.expires,
+const messageQuery = `SELECT sender.handle, m.body, m.reply_to, m.created, m.expires,
  (SELECT json_group_array(json_object('attachment_id',a.id,'filename',a.filename,'size',a.size) ORDER BY a.rowid)
   FROM attachments a WHERE a.message_id=m.id)
  FROM messages m JOIN inboxes sender ON sender.id=m.sender WHERE m.id=? AND m.recipient=? AND m.expires>?`
@@ -72,11 +71,11 @@ func (r *Relay) Poll(ctx context.Context, owner string, id InboxKey, since int64
 	cursor := since
 	address := handle + "@" + r.cfg.Host
 	for _, n := range ids {
-		var m messageView
+		m := messageView{Encoding: "age"}
 		var created, expires int64
 		var attachments []byte
 		err := r.db.QueryRowContext(ctx, messageQuery, n, id, r.cfg.Now().UnixNano()).Scan(
-			&m.From, &m.Body, &m.Encoding, &m.ReplyTo, &created, &expires, &attachments)
+			&m.From, &m.Body, &m.ReplyTo, &created, &expires, &attachments)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -86,6 +85,9 @@ func (r *Relay) Poll(ctx context.Context, owner string, id InboxKey, since int64
 		m.ID = strconv.FormatInt(n, 10)
 		m.From += "@" + r.cfg.Host
 		m.To = address
+		if m.Body == nil {
+			m.Body = []byte{} // File-only mail has an empty base64 string, not JSON null.
+		}
 		m.Created, m.Expires = time.Unix(0, created).UTC(), time.Unix(0, expires).UTC()
 		m.Attachments = attachments
 		if cursor != since {
@@ -148,22 +150,5 @@ func (r *Relay) Delete(ctx context.Context, owner string, id InboxKey, msgID str
 	if !ok {
 		return RequestError("invalid message ID")
 	}
-	r.files.Lock()
-	defer r.files.Unlock()
-	res, err := r.db.ExecContext(ctx, "DELETE FROM messages WHERE id=? AND recipient=? AND expires>?", n, id, r.cfg.Now().UnixNano())
-	if err != nil {
-		return err
-	}
-	count, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return RequestError("message not found")
-	}
-	if err := r.collect(ctx); err != nil {
-		// Queued unlinks remain durable; the logical deletion already succeeded.
-		log.Printf("spool relay: collect deleted attachments: %v", err)
-	}
-	return nil
+	return r.removeMessage(ctx, "DELETE FROM messages WHERE id=? AND recipient=? AND expires>?", n, id)
 }

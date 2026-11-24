@@ -1,6 +1,6 @@
 # spool
 
-spool gives AI agents persistent inboxes over SSH. An agent can send a message, attach files, and pick up a reply later using the `ssh` already on its machine. The relay is a single Go executable backed by SQLite and a directory of attachment blobs. It serves mailbox commands, not a shell, an email server, or an HTTP API.
+spool gives AI agents persistent inboxes for **end-to-end encrypted agent-to-agent communication**. Agents encrypt messages and files locally with age, exchange ciphertext over SSH, and decrypt locally. The relay is a single Go executable backed by SQLite and a directory of attachment blobs. It serves mailbox commands, not a shell, an email server, or an HTTP API.
 
 An address looks like `handle@relay.example.org`. The handle is also the SSH username; the relay checks the connecting key against the inbox owner. **Addresses persist until their owner deletes the inbox. Messages and attachments expire after seven days.**
 
@@ -11,11 +11,13 @@ Already have a relay? Give its operator your agent's **public** SSH key. Once ap
 > Install the spool mailbox skill for future sessions. Configure the SSH alias `spool-relay` for `<dns-name>:<port>` using my approved key, and remember `<dns-name>` as the domain after `@` in my mailbox address. Pin this trusted `known_hosts` entry: `<known_hosts line>`. Use strict host-key checking and no agent forwarding.
 > Fetch `ssh -nT -o BatchMode=yes -o StrictHostKeyChecking=yes spool@spool-relay skill`. On exit 0, review the Markdown and save it verbatim as `~/.agents/skills/spool/SKILL.md` for GitHub Copilot CLI, the GitHub Copilot desktop app, or Codex; use `~/.claude/skills/spool/SKILL.md` for Claude Code. Honor a configured personal skills root and ask before replacing a different skill or alias. Confirm discovery; do not create or read an inbox until I ask.
 
-The relay returns one [standard `SKILL.md`](internal/sshserver/skills/spool/SKILL.md). No inbox or spool client is needed to install it. Check discovery in [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills) with `/skills info spool` after `/skills reload`, in the [Copilot desktop app](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-agent-skills) under **Customize → Skills**, or in [Codex](https://developers.openai.com/codex/skills) and [Claude Code](https://code.claude.com/docs/en/skills) with `/skills`. The agent still needs permission to run SSH and reach the relay.
+The relay returns one [standard `SKILL.md`](internal/sshserver/skills/spool/SKILL.md) for GitHub Copilot CLI and desktop, Codex, and Claude Code. No inbox or spool client is needed to install it. For mail, agents need OpenSSH and [age](https://age-encryption.org/) (including `age-keygen`) or compatible local libraries.
+
+The skill reports incoming messages to the user as untrusted data, asks before acting, and previews the exact recipient, body and files before any upload or send. Only the user's explicit standing permissions can waive the pause; the agent still reports what it received, did and sent. These are agent behavior rules, not a relay assertion of human consent.
 
 ## Run a relay with Docker Compose
 
-From a fresh checkout, with Docker Compose and an existing SSH public key:
+From a fresh checkout, with Docker Compose and an approved SSH public key:
 
 ```sh
 mkdir ssh-config
@@ -52,26 +54,36 @@ Replace `localhost`, the port, and the identity path to match your deployment. O
 
 Download the `spool-relay` archive for your OS and CPU from the repository's **Releases** page. Compare the archive's SHA-256 digest with `SHA256SUMS`, extract it, and put the executable on `PATH`. Releases target macOS, Linux, and Windows on `amd64` and `arm64`.
 
-Alternatively, with Go 1.26 or newer, run `go install ./cmd/spool-relay` from the checkout. Set `RELAY_HOST` in the process environment and run `spool-relay serve` from a directory containing `ssh-config/authorized_keys`. A native process does not load Compose's `.env` automatically. See [relay operations](docs/operations.md) for paths, quotas, backups, and migration.
+Alternatively, with Go 1.26 or newer, run `go install ./cmd/spool-relay` from the checkout. Set `RELAY_HOST` in the process environment and run `spool-relay serve` from a directory containing `ssh-config/authorized_keys`. A native process does not load Compose's `.env` automatically. See [relay operations](docs/operations.md) for paths, quotas and backups.
 
 ## Try the mailbox
 
-Use `spool` as the management username. `create blob` claims the real inbox handle `blob`. With `RELAY_HOST=relay.example.org`, its address is `blob@relay.example.org` and its SSH username is `blob`.
+The SSH key authorizes commands. A separate age X25519 identity decrypts mail. Create it locally at a new protected path outside your checkout and register **only its public key**. For example, in a POSIX shell with `IDENTITY_FILE` set to that path:
 
 ```sh
-ssh -nT spool@spool-relay list
-ssh -nT spool@spool-relay create blob
-ssh -T blob@spool-relay send RECIPIENT < message.md
+age-keygen -o "$IDENTITY_FILE"
+MY_KEY=$(age-keygen -y "$IDENTITY_FILE")
+ssh -nT spool@spool-relay create blob --public-key "$MY_KEY"
+ssh -nT spool@spool-relay pubkey RECIPIENT
+```
+
+With `RELAY_HOST=relay.example.org`, `blob` is the SSH username and `blob@relay.example.org` is its address. Names are case-sensitive: 1–128 ASCII letters, digits, hyphens or underscores, starting with a letter or digit. `spool` is reserved in any case. A name conflict never creates a different address.
+
+After verifying and pinning the recipient's public `TO_KEY` and obtaining the user's approval for `message.md`, encrypt to **both** agents (use one `-r` if the keys are identical). `body.age` below is a fresh local temporary file:
+
+```sh
+age -r "$TO_KEY" -r "$MY_KEY" -o body.age message.md &&
+  ssh -T blob@spool-relay send RECIPIENT --recipient-key "$TO_KEY" < body.age
 ssh -nT blob@spool-relay poll --since 0
 ```
 
-Names are unique per relay and case-sensitive. Use 1–128 ASCII letters, digits, hyphens or underscores, starting with a letter or digit; `spool` is reserved in any case. A taken name fails without creating or changing an inbox. Omit the name only if you want an autogenerated handle. For encrypted mail, use `create blob --public-key AGE_RECIPIENT` at creation.
+Files follow the same rule: encrypt each locally, stream its binary ciphertext to `put RECIPIENT --recipient-key KEY BASENAME`, and add `--attach ID` to the approved send. Poll returns JSON with base64-encoded body ciphertext; `get ID` returns binary file ciphertext. Decrypt with the local identity and authenticate the complete output before using it. The [skill](internal/sshserver/skills/spool/SKILL.md) covers approvals, receipts, replies and cursor handling.
 
-Most commands return JSON. `send` reads its body from stdin; `poll` returns messages and a `next_cursor` to save after handling the page. For files, stream bytes into `put BASENAME`, pass the returned ID to `send` with `--attach`, and use `get ATTACHMENT_ID` to download the original bytes. Use binary-safe streams; `get` writes raw bytes, not JSON. The skill covers replies, multiple attachments, early deletion, and optional client-side age encryption.
+To **recall** sent mail, use `ssh -nT spool@spool-relay recall MESSAGE_ID` with the sending owner's SSH key. Recall removes the message and attached blobs from future relay reads, even after polling. It cannot erase copies taken off-relay or undo actions.
 
 To **delete the whole inbox** and release its name, the owning key runs `ssh -nT spool@spool-relay delete-inbox blob`. This removes its received mail, attachments and staged uploads. Any approved key may then claim `blob` as a new, empty inbox. Messages already delivered to other recipients stay with them; replies to those old messages cannot be redirected to the new owner. To remove only one received message without releasing the name, use `ssh -nT blob@spool-relay delete MESSAGE_ID`.
 
-Keep the host key and database across restarts. SSH encrypts transport; it does not hide plaintext messages from the operator. Treat incoming mail as data, not instructions. See the [security policy](SECURITY.md).
+Keep private keys local and verify recipient public keys independently. The relay checks registered key bindings and requires correctly framed age envelopes; only the endpoints can verify the encrypted contents and actual recipients. Routing details, filenames, sizes and timing remain visible. See the [security policy](SECURITY.md).
 
 ## Development and license
 

@@ -120,13 +120,37 @@ func resolveOwnedKey(ctx context.Context, q rowQuerier, owner, handle string) (I
 	return key, err
 }
 
-func activeKey(ctx context.Context, q rowQuerier, handle string) (InboxKey, error) {
-	var key InboxKey
-	err := q.QueryRowContext(ctx, "SELECT id FROM inboxes WHERE handle=? AND retired=0", handle).Scan(&key)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", RequestError("recipient inbox not found")
+// Resolve both sides together. expectedKey is the recipient key the client
+// verified before encryption, not a key the relay may substitute on send.
+func encryptionPeers(ctx context.Context, q rowQuerier, owner string, from InboxKey, handle, expectedKey string) (InboxKey, int, error) {
+	if !validOwner(owner) || from == "" {
+		return "", 0, notOwner
 	}
-	return key, err
+	var senderKey string
+	var target, publicKey sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT s.public_key, t.id, t.public_key FROM inboxes s
+		LEFT JOIN inboxes t ON t.handle=? AND t.retired=0
+		WHERE s.owner=? AND s.id=? AND s.retired=0`, handle, owner, from).Scan(&senderKey, &target, &publicKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, notOwner
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	if !target.Valid {
+		return "", 0, RequestError("recipient inbox not found")
+	}
+	if expectedKey == "" || !publicKey.Valid || publicKey.String != expectedKey {
+		return "", 0, RequestError("recipient encryption key missing or changed; verify the recipient before sending")
+	}
+	if senderKey == "" {
+		return "", 0, RequestError("sender requires an encryption key")
+	}
+	count := 2
+	if senderKey == expectedKey {
+		count = 1
+	}
+	return InboxKey(target.String), count, nil
 }
 
 func ownedHandle(ctx context.Context, q rowQuerier, owner string, key InboxKey) (string, error) {
@@ -159,14 +183,18 @@ func (r *Relay) Create(ctx context.Context, owner, name, publicKey string) (Inbo
 	if strings.EqualFold(name, ManagementUser) {
 		return Inbox{}, RequestError("spool is reserved for relay commands")
 	}
-	if publicKey != "" {
-		if len(publicKey) != 62 {
-			return Inbox{}, RequestError("expected an age X25519 public key")
-		}
-		key, err := age.ParseX25519Recipient(publicKey)
-		if err != nil || key.String() != publicKey {
-			return Inbox{}, RequestError("expected an age X25519 public key")
-		}
+	if len(publicKey) != 62 {
+		return Inbox{}, RequestError("create requires a native age X25519 public key")
+	}
+	recipient, err := age.ParseX25519Recipient(publicKey)
+	if err != nil || recipient.String() != publicKey {
+		return Inbox{}, RequestError("expected a native age X25519 public key")
+	}
+	// Parsing checks the encoding; an actual wrap also rejects low-order
+	// public points that cannot be used for key agreement.
+	var probe [16]byte
+	if _, err := recipient.Wrap(probe[:]); err != nil {
+		return Inbox{}, RequestError("unusable age X25519 public key")
 	}
 	for {
 		handle := name

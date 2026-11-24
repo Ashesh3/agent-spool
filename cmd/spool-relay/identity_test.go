@@ -33,16 +33,3 @@ func TestHostIdentityIsStableAndNeverReplacedOnError(t *testing.T) {
 		t.Fatal("missing operator-provisioned key was silently generated")
 	}
 }
-
-func TestLegacyOwnershipFileRequiresUniqueApprovedAssignments(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "owners")
-	allowed := map[string]bool{"SHA256:approved": true}
-	for _, content := range []string{"box SHA256:unknown\n", "box SHA256:approved\nbox SHA256:approved\n"} {
-		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := legacyOwners(path, allowed); err == nil {
-			t.Fatal("accepted ambiguous or unauthorized legacy inbox owner")
-		}
-	}
-}

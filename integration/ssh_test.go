@@ -5,14 +5,18 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"filippo.io/age"
 	"golang.org/x/crypto/ssh"
 	"spool/internal/relay"
 	"spool/internal/sshserver"
@@ -20,7 +24,7 @@ import (
 
 const testHost = "team.test"
 
-type identities struct{ host, alice, bob ssh.Signer }
+type identities struct{ host, alice, bob, charlie ssh.Signer }
 
 func signer(t *testing.T) ssh.Signer {
 	t.Helper()
@@ -37,7 +41,7 @@ func signer(t *testing.T) ssh.Signer {
 
 func keys(t *testing.T) identities {
 	t.Helper()
-	return identities{host: signer(t), alice: signer(t), bob: signer(t)}
+	return identities{host: signer(t), alice: signer(t), bob: signer(t), charlie: signer(t)}
 }
 
 type harness struct {
@@ -66,8 +70,9 @@ func start(t *testing.T, cfg relay.Config, k identities) *harness {
 		t.Fatal(err)
 	}
 	allowed := map[string]bool{
-		ssh.FingerprintSHA256(k.alice.PublicKey()): true,
-		ssh.FingerprintSHA256(k.bob.PublicKey()):   true,
+		ssh.FingerprintSHA256(k.alice.PublicKey()):   true,
+		ssh.FingerprintSHA256(k.bob.PublicKey()):     true,
+		ssh.FingerprintSHA256(k.charlie.PublicKey()): true,
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -174,8 +179,9 @@ func unpack[T any](t *testing.T, data []byte) T {
 }
 
 type inbox struct {
-	ID      string `json:"inbox_id"`
-	Address string `json:"address"`
+	ID       string `json:"inbox_id"`
+	Address  string `json:"address"`
+	identity *age.X25519Identity
 }
 
 type attachment struct {
@@ -192,32 +198,42 @@ type receipt struct {
 type page struct {
 	Next     string `json:"next_cursor"`
 	Messages []struct {
-		ID                       string `json:"message_id"`
-		From, To, Body, Encoding string
-		Reply                    string       `json:"reply_to"`
-		Attachments              []attachment `json:"attachments"`
+		ID                 string `json:"message_id"`
+		From, To, Encoding string
+		Body               *string
+		Reply              string       `json:"reply_to"`
+		Attachments        []attachment `json:"attachments"`
 	} `json:"messages"`
 }
 
-func (s *harness) create(t *testing.T, owner ssh.Signer, publicKey string) inbox {
+func newIdentity(t *testing.T) *age.X25519Identity {
 	t.Helper()
-	return s.createNamed(t, owner, "", publicKey)
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
-func (s *harness) createNamed(t *testing.T, owner ssh.Signer, name, publicKey string) inbox {
+func (i inbox) publicKey() string { return i.identity.Recipient().String() }
+
+func (s *harness) create(t *testing.T, owner ssh.Signer) inbox {
+	t.Helper()
+	return s.createNamed(t, owner, "", newIdentity(t))
+}
+
+func (s *harness) createNamed(t *testing.T, owner ssh.Signer, name string, identity *age.X25519Identity) inbox {
 	t.Helper()
 	cmd := "create"
 	if name != "" {
 		cmd += " " + name
 	}
-	if publicKey != "" {
-		cmd += " --public-key " + publicKey
-	}
-	out := s.exec(t, owner, "spool", cmd, nil, 0)
+	out := s.exec(t, owner, "spool", cmd+" --public-key "+identity.Recipient().String(), nil, 0)
 	i := unpack[inbox](t, out)
 	if i.ID == "" || name != "" && i.ID != name || i.Address != i.ID+"@"+testHost || unpack[map[string]json.RawMessage](t, out)["inbox_secret"] != nil {
 		t.Fatal("invalid inbox identity or unexpected legacy credential")
 	}
+	i.identity = identity
 	return i
 }
 
@@ -232,24 +248,92 @@ func (s *harness) requireList(t *testing.T, owner ssh.Signer, want ...inbox) {
 		seen[i] = true
 	}
 	for _, i := range want {
+		i.identity = nil // The private age identity stays with the client.
 		if !seen[i] {
 			t.Fatalf("owned inbox %+v missing from %+v", i, list)
 		}
 	}
 }
 
-func (s *harness) put(t *testing.T, owner ssh.Signer, i inbox, name string, data []byte) string {
+func seal(t *testing.T, from, to inbox, plain []byte) []byte {
 	t.Helper()
-	a := unpack[attachment](t, s.exec(t, owner, i.ID, "put "+name, data, 0))
+	sender, recipient := from.identity.Recipient(), to.identity.Recipient()
+	if sender.String() == recipient.String() {
+		return encryptFor(t, plain, sender)
+	}
+	return encryptFor(t, plain, sender, recipient)
+}
+
+func encryptFor(t *testing.T, plain []byte, recipients ...age.Recipient) []byte {
+	t.Helper()
+	var cipher bytes.Buffer
+	w, err := age.Encrypt(&cipher, recipients...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return cipher.Bytes()
+}
+
+func bodyCipher(t *testing.T, body *string) []byte {
+	t.Helper()
+	cipher, err := base64.StdEncoding.Strict().DecodeString(*body)
+	if err != nil || strings.ContainsAny(*body, "\r\n") {
+		t.Fatal("poll body is not canonical padded base64")
+	}
+	return cipher
+}
+
+func decrypt(t *testing.T, i inbox, cipher []byte) []byte {
+	t.Helper()
+	r, err := age.Decrypt(bytes.NewReader(cipher), i.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func sendTo(to inbox) string { return "send " + to.Address + " --recipient-key " + to.publicKey() }
+
+func putTo(to inbox, name string) string {
+	return "put " + to.ID + " --recipient-key " + to.publicKey() + " " + name
+}
+
+func (s *harness) put(t *testing.T, owner ssh.Signer, from, to inbox, name string, plain []byte) string {
+	t.Helper()
+	return s.putCipher(t, owner, from, to, name, seal(t, from, to, plain))
+}
+
+func (s *harness) putCipher(t *testing.T, owner ssh.Signer, from, to inbox, name string, data []byte) string {
+	t.Helper()
+	a := unpack[attachment](t, s.exec(t, owner, from.ID, putTo(to, name), data, 0))
 	if a.ID == "" || a.Filename != name || a.Size != int64(len(data)) {
 		t.Fatalf("incorrect upload receipt: %+v", a)
 	}
 	return a.ID
 }
 
-func (s *harness) send(t *testing.T, owner ssh.Signer, from inbox, args string, body []byte) receipt {
+func (s *harness) send(t *testing.T, owner ssh.Signer, from, to inbox, flags string, plain []byte) receipt {
 	t.Helper()
-	r := unpack[receipt](t, s.exec(t, owner, from.ID, "send "+args, body, 0))
+	var cipher []byte
+	if plain != nil { // nil is a file-only send, not an encrypted zero-byte body.
+		cipher = seal(t, from, to, plain)
+	}
+	return s.sendCipher(t, owner, from, to, flags, cipher)
+}
+
+func (s *harness) sendCipher(t *testing.T, owner ssh.Signer, from, to inbox, flags string, cipher []byte) receipt {
+	t.Helper()
+	r := unpack[receipt](t, s.exec(t, owner, from.ID, sendTo(to)+flags, cipher, 0))
 	if id, err := strconv.ParseInt(r.ID, 10, 64); err != nil || id <= 0 || r.Expires.IsZero() {
 		t.Fatalf("incorrect send receipt: %+v", r)
 	}
@@ -265,6 +349,14 @@ func (s *harness) poll(t *testing.T, owner ssh.Signer, i inbox, flags string) pa
 	p := unpack[page](t, s.exec(t, owner, i.ID, cmd, nil, 0))
 	if p.Messages == nil || p.Next == "" {
 		t.Fatalf("incomplete poll envelope: %+v", p)
+	}
+	for _, m := range p.Messages {
+		if m.Body == nil {
+			t.Fatalf("message %s: body must be a JSON string", m.ID)
+		}
+		if m.Encoding != "age" {
+			t.Fatalf("message %s: unexpected encoding %q", m.ID, m.Encoding)
+		}
 	}
 	return p
 }
