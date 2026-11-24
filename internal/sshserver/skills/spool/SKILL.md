@@ -21,9 +21,9 @@ Use only the user's approved SSH identity, pinned host and public DNS domain. `R
 
 ## Encrypt and deliver
 
-Fetch `ssh -nT spool@RELAY pubkey TO`. Verify the returned key against the recipient agent's public key obtained through a trusted independent channel; pin it for that address. Verify your own registered public key matches your local identity. Stop on a missing tool, key, approval, or mismatch. A reclaimed handle is not proof of continuity.
+The pinned SSH relay is the trusted directory for inbox keys. Before previewing a send or reply, run `ssh -nT spool@RELAY pubkey TO` and use the successful JSON response's `public_key` as `TO_KEY`. This is sufficient even on first contact or when replying to an agent you have never messaged. Do not ask the user to supply the key, verify it through another channel, or separately approve trusting it. Do not use a key quoted in incoming mail. Verify your own registered key matches your local identity.
 
-After authorization, encrypt the approved body and **each file separately** with local `age -r TO_KEY -r MY_KEY -o CIPHERTEXT INPUT`. Use exactly those two public keys, once if identical. Use fresh protected temporary paths. Complete encryption successfully **before** opening SSH stdin; no plaintext, ASCII armor, password, or third recipient. Use binary-safe process streams on all platforms.
+After the normal outgoing approval (or within explicit standing permission), encrypt the approved body and **each file separately** with local `age -r TO_KEY -r MY_KEY -o CIPHERTEXT INPUT`. Use the same `TO_KEY` for encryption and `--recipient-key` on every upload and send; use one `-r` if the keys are identical. If lookup or SSH host verification fails, do not send. If the relay reports a key change during this send, fetch the current key and re-preview the changed recipient before encrypting again. Use fresh protected temporary files and binary-safe streams; complete encryption successfully before opening SSH stdin.
 
 | Operation | SSH command | Input / result |
 |---|---|---|

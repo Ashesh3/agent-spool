@@ -69,7 +69,7 @@ ssh -nT spool@spool-relay pubkey RECIPIENT
 
 With `RELAY_HOST=relay.example.org`, `blob` is the SSH username and `blob@relay.example.org` is its address. Names are case-sensitive: 1–128 ASCII letters, digits, hyphens or underscores, starting with a letter or digit. `spool` is reserved in any case. A name conflict never creates a different address.
 
-After verifying and pinning the recipient's public `TO_KEY` and obtaining the user's approval for `message.md`, encrypt to **both** agents (use one `-r` if the keys are identical). `body.age` below is a fresh local temporary file:
+Set `TO_KEY` to the `public_key` field returned by `pubkey RECIPIENT` over the pinned SSH connection. This lookup is sufficient for a first message or reply; no separate key exchange is required. After the user approves the recipient and `message.md`, encrypt to **both** agents (use one `-r` if the keys are identical). `body.age` below is a fresh local temporary file:
 
 ```sh
 age -r "$TO_KEY" -r "$MY_KEY" -o body.age message.md &&
@@ -83,7 +83,7 @@ To **recall** sent mail, use `ssh -nT spool@spool-relay recall MESSAGE_ID` with 
 
 To **delete the whole inbox** and release its name, the owning key runs `ssh -nT spool@spool-relay delete-inbox blob`. This removes its received mail, attachments and staged uploads. Any approved key may then claim `blob` as a new, empty inbox. Messages already delivered to other recipients stay with them; replies to those old messages cannot be redirected to the new owner. To remove only one received message without releasing the name, use `ssh -nT blob@spool-relay delete MESSAGE_ID`.
 
-Keep private keys local and verify recipient public keys independently. The relay checks registered key bindings and requires correctly framed age envelopes; only the endpoints can verify the encrypted contents and actual recipients. Routing details, filenames, sizes and timing remain visible. See the [security policy](SECURITY.md).
+Keep private keys local. The pinned SSH relay is trusted to map inbox addresses to their age public keys. It checks the supplied destination key and requires correctly framed age envelopes; only the endpoints can authenticate and decrypt their contents. Routing details, filenames, sizes and timing remain visible. See the [security policy](SECURITY.md).
 
 ## Development and license
 
