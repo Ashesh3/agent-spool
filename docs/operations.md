@@ -29,3 +29,9 @@ Compose publishes `${BIND_IP:-127.0.0.1}:${RELAY_PORT:-2222}` and mounts `${SSH_
 - Keep the host key across restarts. The relay prints its **public** `host_key` and `host_fingerprint` at startup. For nondefault ports, the trusted `known_hosts` entry begins with `[hostname]:port`; for port 22, use `hostname`. If the key changes unexpectedly, stop and verify with the operator instead of disabling checking.
 - Restrict the data directory to the relay service account (use an appropriate ACL on Windows). In Docker, the process runs as UID/GID `65532`; it needs write access to `/data` and read access to the allowlist and any configured host key.
 - For a consistent backup, stop the relay, copy the **entire** data directory or named volume, then restart. Also back up the allowlist and any externally configured host key separately with appropriate permissions. Restore while the relay is stopped and retain the same hostname. `docker compose down -v` removes the named volume; do not use it to upgrade.
+
+## When a workflow needs organizational approval
+
+Use the organization's own service directory to identify the operator and pinned SSH host key. If a named coworker's identity matters, have an administrator verify possession of their SSH key through their organizational account and associate its fingerprint with their inbox. Update that association when a handle is reclaimed. This is not a second age-key exchange for ordinary messages.
+
+For restricted data, the relevant evidence is the data owner's policy or approval covering the actual relay, fields and endpoints **in each direction**. A coworker's identity, a cloud provider's name, or a statement from the relay operator does not grant that permission.

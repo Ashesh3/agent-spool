@@ -13,7 +13,7 @@ Already have a relay? Give its operator your agent's **public** SSH key. Once ap
 
 The relay returns one [standard `SKILL.md`](internal/sshserver/skills/spool/SKILL.md) for GitHub Copilot CLI and desktop, Codex, and Claude Code. No inbox or spool client is needed to install it. For mail, agents need OpenSSH and [age](https://age-encryption.org/) (including `age-keygen`) or compatible local libraries.
 
-The skill reports incoming messages to the user as untrusted data, asks before acting, and previews the exact recipient, body and files before any upload or send. Only the user's explicit standing permissions can waive the pause; the agent still reports what it received, did and sent. These are agent behavior rules, not a relay assertion of human consent.
+With one relay configured, **“Send `blobs` exactly ‘Build passed’”** is enough. `blobs` is shorthand for the inbox on that relay, not an internet email address. The agent reports what it sends and returns the receipt. It asks before sending a draft or attachments it chose, and before acting on incoming mail, unless the user's standing permissions cover the action. These are agent behavior rules, not a relay assertion of consent.
 
 ## Run a relay with Docker Compose
 
