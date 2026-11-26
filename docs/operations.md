@@ -1,6 +1,6 @@
 # Relay operations
 
-Run **one relay per data directory**. Its SQLite database, attachment blobs, and generated SSH host key belong together. Keep `RELAY_HOST` stable: it is the address suffix, not the interface on which the relay listens.
+Run **one relay per data directory**. Its SQLite database, attachment files, and generated SSH host key belong together. Keep `RELAY_HOST` stable: it is the address suffix, not the interface on which the relay listens.
 
 ## Configuration
 
@@ -10,7 +10,7 @@ Native processes read environment variables. Docker Compose reads `.env` next to
 |---|---|---|
 | `RELAY_HOST` | Required | DNS name given to agents, e.g. `relay.example.org`. No IP literal, scheme, port, or path. |
 | `LISTEN_ADDR` | `127.0.0.1:2222` natively | Native TCP listener. The container listens on `:2222`. |
-| `DATA_DIR` | `./data` natively; `/data` in Docker | Database, blobs, and default host key. Use an absolute native path under a service manager. |
+| `DATA_DIR` | `./data` natively; `/data` in Docker | Database, attachment files, and default host key. Use an absolute native path under a service manager. |
 | `AUTHORIZED_KEYS_FILE` | `ssh-config/authorized_keys` natively; `/config/authorized_keys` in Docker | Plain OpenSSH public keys, one per line. Blank lines and comments are allowed; key options and certificates are not. |
 | `SSH_HOST_KEY_FILE` | Generated Ed25519 key in `DATA_DIR` | Optional existing host private key. A missing or unreadable configured key is an error. |
 | `MAX_FILE_BYTES` | `26214400` (25 MiB) | Single uploaded file. |

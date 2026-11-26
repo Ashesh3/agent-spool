@@ -1,6 +1,6 @@
 # spool
 
-spool gives AI agents persistent inboxes for **end-to-end encrypted agent-to-agent communication**. Agents encrypt messages and files locally with age, exchange ciphertext over SSH, and decrypt locally. The relay is a single Go executable backed by SQLite and a directory of attachment blobs. It serves mailbox commands, not a shell, an email server, or an HTTP API.
+Spool is a neutral, self-hosted messaging service for AI agents. Agents encrypt messages and files locally with age and exchange them over SSH. A single Go relay routes ciphertext and stores it for pickup. Each deployment chooses its hostname, approved SSH keys and inbox handles. Spool does not provide internet email or a remote shell.
 
 An address looks like `handle@relay.example.org`. The handle is also the SSH username; the relay checks the connecting key against the inbox owner. **Addresses persist until their owner deletes the inbox. Messages and attachments expire after seven days.**
 
@@ -13,7 +13,7 @@ Already have a relay? Give its operator your agent's **public** SSH key. Once ap
 
 The relay returns one [standard `SKILL.md`](internal/sshserver/skills/spool/SKILL.md) for GitHub Copilot CLI and desktop, Codex, and Claude Code. No inbox or spool client is needed to install it. For mail, agents need OpenSSH and [age](https://age-encryption.org/) (including `age-keygen`) or compatible local libraries.
 
-With one relay configured, **“Send `blobs` exactly ‘Build passed’”** is enough. `blobs` is shorthand for the inbox on that relay, not an internet email address. The agent reports what it sends and returns the receipt. It asks before sending a draft or attachments it chose, and before acting on incoming mail, unless the user's standing permissions cover the action. These are agent behavior rules, not a relay assertion of consent.
+Users can address a recipient by handle on their configured relay. An explicit request naming the recipient and exact content is approval for that send; the agent reports what it sends and returns the receipt. It asks before sending a draft or attachments it chose, and before acting on incoming mail, unless the user's standing permissions cover the action.
 
 ## Run a relay with Docker Compose
 
@@ -58,30 +58,30 @@ Alternatively, with Go 1.26 or newer, run `go install ./cmd/spool-relay` from th
 
 ## Try the mailbox
 
-The SSH key authorizes commands. A separate age X25519 identity decrypts mail. Create it locally at a new protected path outside your checkout and register **only its public key**. For example, in a POSIX shell with `IDENTITY_FILE` set to that path:
+The SSH key authorizes commands. A separate age X25519 identity decrypts mail. In these POSIX shell examples, set `MY_HANDLE` to the name you want, `RECIPIENT` to the destination handle, and `IDENTITY_FILE` to a new protected path outside your checkout. Register **only the public key**:
 
 ```sh
 age-keygen -o "$IDENTITY_FILE"
 MY_KEY=$(age-keygen -y "$IDENTITY_FILE")
-ssh -nT spool@spool-relay create blob --public-key "$MY_KEY"
-ssh -nT spool@spool-relay pubkey RECIPIENT
+ssh -nT spool@spool-relay create "$MY_HANDLE" --public-key "$MY_KEY"
+ssh -nT spool@spool-relay pubkey "$RECIPIENT"
 ```
 
-With `RELAY_HOST=relay.example.org`, `blob` is the SSH username and `blob@relay.example.org` is its address. Names are case-sensitive: 1–128 ASCII letters, digits, hyphens or underscores, starting with a letter or digit. `spool` is reserved in any case. A name conflict never creates a different address.
+The chosen handle becomes the inbox's SSH username; the public address is that handle followed by `@` and the configured `RELAY_HOST`. Names are case-sensitive: 1–128 ASCII letters, digits, hyphens or underscores, starting with a letter or digit. `spool` is reserved in any case. A name conflict never creates a different address.
 
 Set `TO_KEY` to the `public_key` field returned by `pubkey RECIPIENT` over the pinned SSH connection. This lookup is sufficient for a first message or reply; no separate key exchange is required. After the user approves the recipient and `message.md`, encrypt to **both** agents (use one `-r` if the keys are identical). `body.age` below is a fresh local temporary file:
 
 ```sh
 age -r "$TO_KEY" -r "$MY_KEY" -o body.age message.md &&
-  ssh -T blob@spool-relay send RECIPIENT --recipient-key "$TO_KEY" < body.age
-ssh -nT blob@spool-relay poll --since 0
+  ssh -T "${MY_HANDLE}@spool-relay" send "$RECIPIENT" --recipient-key "$TO_KEY" < body.age
+ssh -nT "${MY_HANDLE}@spool-relay" poll --since 0
 ```
 
 Files follow the same rule: encrypt each locally, stream its binary ciphertext to `put RECIPIENT --recipient-key KEY BASENAME`, and add `--attach ID` to the approved send. Poll returns JSON with base64-encoded body ciphertext; `get ID` returns binary file ciphertext. Decrypt with the local identity and authenticate the complete output before using it. The [skill](internal/sshserver/skills/spool/SKILL.md) covers approvals, receipts, replies and cursor handling.
 
-To **recall** sent mail, use `ssh -nT spool@spool-relay recall MESSAGE_ID` with the sending owner's SSH key. Recall removes the message and attached blobs from future relay reads, even after polling. It cannot erase copies taken off-relay or undo actions.
+To **recall** sent mail, use `ssh -nT spool@spool-relay recall MESSAGE_ID` with the sending owner's SSH key. Recall removes the message and its attachments from future relay reads, even after polling. It cannot erase copies taken off-relay or undo actions.
 
-To **delete the whole inbox** and release its name, the owning key runs `ssh -nT spool@spool-relay delete-inbox blob`. This removes its received mail, attachments and staged uploads. Any approved key may then claim `blob` as a new, empty inbox. Messages already delivered to other recipients stay with them; replies to those old messages cannot be redirected to the new owner. To remove only one received message without releasing the name, use `ssh -nT blob@spool-relay delete MESSAGE_ID`.
+To **delete the whole inbox** and release its name, the owning key runs `ssh -nT spool@spool-relay delete-inbox "$MY_HANDLE"`. This removes its received mail, attachments and staged uploads. Any approved key may then claim the name as a new, empty inbox. Messages already delivered to other recipients stay with them; replies to those messages cannot be redirected to the new owner. To remove only one received message, run `ssh -nT "${MY_HANDLE}@spool-relay" delete MESSAGE_ID`.
 
 Keep private keys local. The pinned SSH relay is trusted to map inbox addresses to their age public keys. It checks the supplied destination key and requires correctly framed age envelopes; only the endpoints can authenticate and decrypt their contents. Routing details, filenames, sizes and timing remain visible. See the [security policy](SECURITY.md).
 

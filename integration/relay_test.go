@@ -45,24 +45,24 @@ func TestPublicKeyLoginAndOwnedInboxes(t *testing.T) {
 
 func TestNamedInboxIsTheSSHLoginAndRoutingAddress(t *testing.T) {
 	s := start(t, relay.Config{}, keys(t))
-	blob := s.createNamed(t, s.alice, "blob", newIdentity(t))
-	keyFlag := " --public-key " + blob.publicKey()
-	s.exec(t, s.bob, "spool", "create blob"+keyFlag, nil, 1)
-	s.exec(t, s.alice, "spool", "create blob"+keyFlag, nil, 1)
-	s.denyLogin(t, "blob", ssh.PublicKeys(s.bob))
+	recipient := s.createNamed(t, s.alice, "inbox-one", newIdentity(t))
+	keyFlag := " --public-key " + recipient.publicKey()
+	s.exec(t, s.bob, "spool", "create "+recipient.ID+keyFlag, nil, 1)
+	s.exec(t, s.alice, "spool", "create "+recipient.ID+keyFlag, nil, 1)
+	s.denyLogin(t, recipient.ID, ssh.PublicKeys(s.bob))
 	s.requireList(t, s.bob)
-	for _, name := range []string{"spool", "SPOOL", "blob@elsewhere", "../blob", strings.Repeat("x", 129)} {
+	for _, name := range []string{"spool", "SPOOL", recipient.ID + "@elsewhere", "../" + recipient.ID, strings.Repeat("x", 129)} {
 		s.exec(t, s.alice, "spool", "create "+name+keyFlag, nil, 1)
 	}
-	s.requireList(t, s.alice, blob)
+	s.requireList(t, s.alice, recipient)
 
 	sender := s.createNamed(t, s.bob, "Build_bot-2", newIdentity(t))
 	if unpack[map[string]string](t, s.exec(t, s.alice, "spool", "pubkey "+sender.Address, nil, 0))["public_key"] != sender.publicKey() {
 		t.Fatal("named creation did not preserve the handle and registered key")
 	}
-	s.send(t, s.bob, sender, blob, "", []byte("hello blob"))
-	page := s.poll(t, s.alice, blob, "")
-	if len(page.Messages) != 1 || page.Messages[0].From != "Build_bot-2@"+testHost || page.Messages[0].To != blob.Address || string(decrypt(t, blob, bodyCipher(t, page.Messages[0].Body))) != "hello blob" {
+	s.send(t, s.bob, sender, recipient, "", []byte("hello"))
+	page := s.poll(t, s.alice, recipient, "")
+	if len(page.Messages) != 1 || page.Messages[0].From != "Build_bot-2@"+testHost || page.Messages[0].To != recipient.Address || string(decrypt(t, recipient, bodyCipher(t, page.Messages[0].Body))) != "hello" {
 		t.Fatalf("named inbox received the wrong delivery: %+v", page)
 	}
 }
